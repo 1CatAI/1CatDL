@@ -1,0 +1,14 @@
+[Unit]
+Description=1Cat host-enforced read-only SATA public export
+RequiresMountsFor=/mnt/sata-raid0-3
+After=local-fs.target
+Before=libvirtd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/1cat-shared-export.py
+RemainAfterExit=yes
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

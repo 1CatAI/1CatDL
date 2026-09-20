@@ -1,0 +1,14 @@
+# Managed by 1Cat shared-storage v1
+[Unit]
+Description=1Cat public read-only data at /shared
+After=systemd-modules-load.service local-fs.target
+ConditionVirtualization=kvm
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/1cat-mount-shared
+RemainAfterExit=yes
+TimeoutStartSec=25
+
+[Install]
+WantedBy=multi-user.target
