@@ -29,6 +29,7 @@ import {
 } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
+import { BrandLogo } from '@/components/brand-logo';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -931,7 +932,7 @@ export default function Home() {
     <TooltipProvider>
       <div className="dashboard-app" data-design-version="v3-20260905">
       <aside className="sidebar">
-        <a className="rail-brand" href="#overview" aria-label="1CAT 看板首页">1<span>C</span></a>
+        <a className="rail-brand" href="#overview" aria-label="1CatDL 看板首页"><BrandLogo compact /></a>
         <nav aria-label="看板分区">
           <a href="#fabric"><Network size={21} /><span>互联</span></a>
           <a href="#energy"><Zap size={21} /><span>电费</span></a>
@@ -943,7 +944,7 @@ export default function Home() {
         <a href="#fabric" className="skip-link">跳到互联状态</a>
         <header className="topbar">
           <div className="brand-lockup">
-            <strong className="brand-wordmark">1CAT <span>CONTROL ROOM</span></strong>
+            <strong className="brand-wordmark"><BrandLogo /><span>CONTROL ROOM</span></strong>
           </div>
 
           <div className="host-pill">

@@ -50,6 +50,8 @@ for (const name of ["favicon.svg"]) {
   }
 }
 
+await cp(path.join(clientRoot, "brand"), path.join(outputRoot, "brand"), { recursive: true });
+
 for (const [relativePath, html] of htmlByPath) {
   const target = path.join(outputRoot, relativePath);
   await mkdir(path.dirname(target), { recursive: true });

@@ -97,7 +97,7 @@ svg { flex-shrink: 0; }
 .skip-link:focus { top: 12px; }
 .sidebar { position: fixed; z-index: 20; inset: 0 auto 0 0; width: 88px; display: flex; align-items: center; flex-direction: column; background: #fff; border-right: 1px solid var(--border); }
 .rail-brand { display: flex; align-items: center; justify-content: center; margin-top: 24px; width: 44px; height: 44px; background: #15233f; color: #fff; border-radius: 14px; font-size: 24px; font-weight: 700; letter-spacing: -.12em; padding-right: 3px; }
-.rail-brand span { color: #bed795; }
+.rail-brand .brand-logo { width: 29px; height: 24px; filter: invert(1); }
 .sidebar nav { display: grid; gap: 14px; width: 100%; margin-top: 56px; padding-inline: 12px; }
 .sidebar nav a { display: flex; flex-direction: column; align-items: center; gap: 6px; min-height: 64px; justify-content: center; border-radius: 12px; color: #64728a; font-size: 12px; transition: background-color .15s, color .15s; }
 .sidebar nav a:first-child { color: var(--blue); background: #edf2ff; }
@@ -105,7 +105,8 @@ svg { flex-shrink: 0; }
 .rail-bottom { display: grid; justify-items: center; gap: 7px; margin-top: auto; padding-bottom: 26px; color: #75829a; font: 12px var(--font-geist-mono), monospace; }
 .rail-bottom small { margin-top: 9px; padding: 3px 7px; border-radius: 5px; background: #f0f3f8; font-size: 12px; }
 .topbar { display: flex; align-items: center; gap: 28px; min-height: 74px; border-bottom: 1px solid var(--border); }
-.brand-wordmark { white-space: nowrap; font-size: 17px; font-weight: 750; letter-spacing: -.035em; }
+.brand-wordmark { display: flex; align-items: center; gap: 12px; white-space: nowrap; font-size: 17px; font-weight: 750; letter-spacing: -.035em; }
+.brand-wordmark .brand-logo { display: block; width: 136px; height: auto; }
 .brand-wordmark span { padding-left: 10px; font: 500 12px var(--font-geist-mono), monospace; letter-spacing: .045em; color: #6b7990; }
 .host-pill { display: flex; align-items: center; gap: 9px; padding-left: 25px; border-left: 1px solid #d5deeb; color: var(--text-muted); min-width: 0; font-size: 12px; }
 .host-pill strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #586881; font: 450 12px var(--font-geist-mono), monospace; }

@@ -15,6 +15,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: 'Gaudi2 HLS2 Fabric Control',
   description: 'ymzx-Intel-001 Gaudi2 实时互联与硬件状态面板',
+  icons: { icon: [{ url: '/favicon.svg?v=ymzx-29675b01', type: 'image/svg+xml' }] },
 };
 
 export default function RootLayout({

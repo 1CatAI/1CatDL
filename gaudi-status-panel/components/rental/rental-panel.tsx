@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { BrandLogo } from '@/components/brand-logo';
 import {
   ArrowRight,
   CheckCircle2,
@@ -318,7 +319,7 @@ export function RentalPanel() {
     <main className="rental-app">
       <div className="rental-shell">
         <header className="rental-header">
-          <div className="rental-brand"><div className="rental-brand-mark">1</div><div><strong>1CAT COMPUTE</strong><span>GAUDI GPU CLOUD / G2-002</span></div></div>
+          <RentalBrand />
           <div className="rental-header-right"><span className={state.service === 'ready' ? 'rental-live-dot' : 'rental-warn-dot'} />资源池 {availableSlots}/{state.slots.length} 可用 · {state.account.name} · 余额 {formatMoney(state.account.balanceCents)} <button type="button" className="rental-icon-button" onClick={() => void refresh()} aria-label="刷新资源池"><RefreshCw size={16} /></button><button type="button" className="rental-small-button" onClick={() => void logout()}>退出登录</button></div>
         </header>
 
@@ -391,6 +392,10 @@ export function RentalPanel() {
   );
 }
 
+function RentalBrand() {
+  return <div className="rental-brand"><BrandLogo /><div className="rental-brand-detail"><strong>1CatDL</strong><span>GAUDI GPU CLOUD / G2-002</span></div></div>;
+}
+
 function RechargeContactBanner({ compact = false }: { compact?: boolean }) {
   return <aside className={`rental-recharge-contact${compact ? ' rental-recharge-contact-compact' : ''}`} aria-label="充值管理员联系方式">
     <div className="rental-recharge-contact-lead"><span className="rental-recharge-contact-icon"><MessageCircle size={19} /></span><div><small>TOP UP SUPPORT</small><strong>充值请联系管理员</strong><span>确认到账后，管理员会发放充值码，兑换即可入账。</span></div></div>
@@ -409,7 +414,7 @@ function AuthGate({ mode, setMode, name, setName, password, setPassword, submitt
   onSubmit: () => void;
   notice: { tone: 'info' | 'success' | 'error'; text: string } | null;
 }) {
-  return <main className="rental-app"><div className="rental-auth-shell"><div className="rental-brand"><div className="rental-brand-mark">1</div><div><strong>1CAT COMPUTE</strong><span>GAUDI GPU CLOUD / G2-002</span></div></div><section className="rental-card rental-auth-card"><div className="rental-kicker">SELF-SERVICE ACCESS</div><h1>{mode === 'login' ? '登录 GPU 云实例' : '注册客户账户'}</h1><p>{mode === 'login' ? '登录后管理实例、余额与 SSH 入口。' : '注册后请先充值；余额不足时实例无法开机或会自动关机。'}</p><RechargeContactBanner compact />{notice && <div className={`rental-notice rental-notice-${notice.tone}`}>{notice.text}</div>}<label className="rental-field"><span>账户名</span><input value={name} autoComplete="username" onChange={(event) => setName(event.target.value)} /></label><label className="rental-field"><span>密码</span><input type="password" value={password} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') onSubmit(); }} /></label><button className="rental-primary-button" type="button" disabled={submitting || !name.trim() || !password} onClick={onSubmit}>{submitting ? '处理中…' : mode === 'login' ? '登录' : '创建账户'}</button><button className="rental-auth-switch" type="button" onClick={() => setMode(mode === 'login' ? 'register' : 'login')}>{mode === 'login' ? '还没有账户？立即注册' : '已有账户？返回登录'}</button></section></div></main>;
+  return <main className="rental-app"><div className="rental-auth-shell"><RentalBrand /><section className="rental-card rental-auth-card"><div className="rental-kicker">SELF-SERVICE ACCESS</div><h1>{mode === 'login' ? '登录 GPU 云实例' : '注册客户账户'}</h1><p>{mode === 'login' ? '登录后管理实例、余额与 SSH 入口。' : '注册后请先充值；余额不足时实例无法开机或会自动关机。'}</p><RechargeContactBanner compact />{notice && <div className={`rental-notice rental-notice-${notice.tone}`}>{notice.text}</div>}<label className="rental-field"><span>账户名</span><input value={name} autoComplete="username" onChange={(event) => setName(event.target.value)} /></label><label className="rental-field"><span>密码</span><input type="password" value={password} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') onSubmit(); }} /></label><button className="rental-primary-button" type="button" disabled={submitting || !name.trim() || !password} onClick={onSubmit}>{submitting ? '处理中…' : mode === 'login' ? '登录' : '创建账户'}</button><button className="rental-auth-switch" type="button" onClick={() => setMode(mode === 'login' ? 'register' : 'login')}>{mode === 'login' ? '还没有账户？立即注册' : '已有账户？返回登录'}</button></section></div></main>;
 }
 
 function AdminPanel({ currentRateCents, onNotice }: { currentRateCents: number; onNotice: (notice: { tone: 'info' | 'success' | 'error'; text: string } | null) => void }) {

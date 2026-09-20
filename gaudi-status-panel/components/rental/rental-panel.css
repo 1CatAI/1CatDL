@@ -1,8 +1,9 @@
 .rental-app { min-height: 100vh; color: #17233c; background: #f5f7fb; }
 .rental-shell { width: min(1480px, calc(100% - 56px)); margin: 0 auto; padding-bottom: 38px; }
 .rental-header { display: flex; align-items: center; justify-content: space-between; min-height: 76px; border-bottom: 1px solid #e3e8f1; }
-.rental-brand { display: flex; align-items: center; gap: 11px; }
-.rental-brand-mark { display: grid; place-items: center; width: 36px; height: 36px; color: #fff; background: #172944; border-radius: 11px; font-size: 20px; font-weight: 750; box-shadow: inset 0 -4px #93b6ff; }
+.rental-brand { display: flex; align-items: center; gap: 18px; flex-shrink: 0; }
+.rental-brand .brand-logo { display: block; width: 145px; height: auto; flex-shrink: 0; }
+.rental-brand-detail { padding-left: 18px; border-left: 1px solid #dbe2ed; }
 .rental-brand strong, .rental-brand span { display: block; }
 .rental-brand strong { font-size: 14px; letter-spacing: .05em; }
 .rental-brand span { margin-top: 2px; color: #8390a6; font: 11px var(--font-geist-mono), monospace; letter-spacing: .04em; }
@@ -153,7 +154,9 @@
 
 .rental-auth-loading { display: grid; place-items: center; min-height: 100vh; color: #71809a; font-size: 14px; }
 .rental-auth-shell { width: min(480px, calc(100% - 36px)); margin: 0 auto; padding-top: 11vh; }
-.rental-auth-shell > .rental-brand { justify-content: center; margin-bottom: 26px; }
+.rental-auth-shell > .rental-brand { flex-direction: column; justify-content: center; gap: 14px; margin-bottom: 28px; }
+.rental-auth-shell .brand-logo { width: 190px; }
+.rental-auth-shell .rental-brand-detail { padding-left: 0; border-left: 0; text-align: center; }
 .rental-auth-card { padding: 29px; }
 .rental-auth-card h1 { margin-top: 8px; color: #203452; font-size: 27px; letter-spacing: -.05em; }
 .rental-auth-card p { margin: 9px 0 23px; color: #75849b; font-size: 13px; line-height: 1.6; }
@@ -337,3 +340,8 @@
 .rental-avatar-headless { color: #177973 !important; background: #e8f7f5 !important; }
 .rental-headless-button { color: #177973 !important; border-color: #b8dfdb !important; }
 @media (max-width: 430px) { .rental-mode-picker > div { grid-template-columns: 1fr; } .rental-headless-capacity { margin: 16px; } }
+@media (max-width: 760px) {
+  .rental-header { flex-wrap: wrap; gap: 14px; padding-block: 18px; }
+  .rental-header .rental-brand .brand-logo { width: 127px; }
+  .rental-header-right { gap: 8px; }
+}
