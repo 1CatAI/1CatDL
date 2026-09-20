@@ -3,6 +3,10 @@
 set -eu
 tag=onecat-public
 target=/shared
+share_alias() {
+    # Never replace a customer-created /share directory or symlink.
+    if [ ! -e /share ] && [ ! -L /share ]; then ln -s /shared /share; fi
+}
 modprobe -q virtiofs
 # The image can also boot without the optional filesystem device.
 found=0
@@ -15,6 +19,7 @@ if mountpoint -q "$target"; then
     [ "$(findmnt -rn -M "$target" -o FSTYPE)" = virtiofs ]
     [ "$(findmnt -rn -M "$target" -o SOURCE)" = "$tag" ]
     findmnt -rn -M "$target" -o OPTIONS | grep -Eq '(^|,)ro(,|$)'
+    share_alias
     exit 0
 fi
 if [ -d "$target" ] && [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
@@ -23,3 +28,4 @@ if [ -d "$target" ] && [ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -qu
 fi
 install -d -m 0755 "$target"
 mount -t virtiofs -o ro,nosuid,nodev "$tag" "$target"
+share_alias

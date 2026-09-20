@@ -24,6 +24,7 @@ from pathlib import Path
 
 from backend import LibvirtBackend, SimulationBackend
 from recharge_codes import RedemptionRateLimited
+from remote_backend import BackendRouter, NodeUnavailable, load_nodes, LOCAL_NODE
 from core import (
     Core,
     FIXED_MEMORY_GB,
@@ -159,6 +160,7 @@ class Service:
         self.lock = threading.RLock()
         self.rate_cents_per_hour = int(os.environ.get("RENTAL_RATE_CENTS_PER_HOUR", "0"))
         self.headless_count = int(os.environ.get("RENTAL_HEADLESS_COUNT", "16"))
+        self.node_configs = load_nodes(os.environ.get('RENTAL_NODES_CONFIG'))
         self.core = Core(
             ROOT / "state",
             memory_budget=int(os.environ.get("RENTAL_MEMORY_BUDGET_MB", "500000")),
@@ -169,8 +171,12 @@ class Service:
             slot_count=SLOT_COUNT,
             rate_cents_per_hour=self.rate_cents_per_hour,
             headless_count=self.headless_count,
+            nodes={node['id']:node.get('budget',{}) for node in self.node_configs},
         )
         self.backend = SimulationBackend() if SIMULATION else LibvirtBackend(ROOT, CONFIG)
+        if self.node_configs:
+            self.backend = BackendRouter(self.backend,self.node_configs)
+        self.node_status = {}
         self.meta_path = ROOT / "state" / "metadata.json"
         self.secret_path = ROOT / "state" / "instance-secrets.json"
         self.public_host = os.environ.get("RENTAL_PUBLIC_HOST", "dx.1catai.com")
@@ -243,6 +249,7 @@ class Service:
     def maintenance_loop(self):
         while not self.closed.is_set():
             try:
+                self.reconcile_nodes()
                 self.reconcile_runtime()
                 self.core.bill_running()
                 if not (ROOT / 'state' / 'storage-maintenance').exists():
@@ -256,17 +263,68 @@ class Service:
     def backend_instance(row):
         return {"id": str(row["id"]), "slot": row["slot"], "vcpu": row["cpu"],
                 "memory_mb": row["ram"], "data_disk": row["data"],
+                "node_id": row.get('node_id',LOCAL_NODE), "generation": row.get('generation',0),
                 "mode": row.get("mode", "gpu"), "endpoint": row.get("endpoint", row["slot"])}
+
+    def reconcile_nodes(self):
+        if not isinstance(self.backend, BackendRouter):
+            return
+        rows = self.core.active_instances()
+        # Do not let a failed remote node delay local billing or other nodes.
+        def refresh(node_id, remote):
+            wanted = [self.backend_instance(row) for row in rows if row['node_id'] == node_id
+                      and (row['state'] == 'running' or row['desired_action'] == 'start')]
+            snapshot = remote.heartbeat(wanted)
+            if snapshot:
+                for row in rows:
+                    if row['node_id'] != node_id:
+                        continue
+                    observed = snapshot.get('instances',{}).get(str(row['id']),{})
+                    if observed.get('generation') == row['generation'] and observed.get('lastRunningAt'):
+                        self.core.confirm_remote_runtime(row['id'],row['generation'],observed['lastRunningAt'])
+                    if (observed.get('generation') == row['generation'] and observed.get('state') == 'running'
+                            and observed.get('sshReady') is False):
+                        # A node process restart loses its in-memory proxy targets,
+                        # not the VM. Retry only connectivity, without changing billing.
+                        with self.lock: self.forwarded.discard(row['id'])
+                    if (row['state'] == 'running' and observed.get('generation') == row['generation']
+                            and observed.get('state') in ('off','absent')
+                            and self.core.observe_poweroff(row['id'],generation=row['generation'])):
+                        with self.lock: self.forwarded.discard(row['id'])
+            with self.lock:
+                self.node_status[node_id] = False
+        for node_id, remote in self.backend.remotes.items():
+            with self.lock:
+                if self.node_status.get(node_id):
+                    continue
+                self.node_status[node_id] = True
+            def run(node_id=node_id,remote=remote):
+                try: refresh(node_id,remote)
+                finally:
+                    with self.lock: self.node_status[node_id] = False
+            threading.Thread(target=run,daemon=True,name=f'node-status-{node_id}').start()
+
+    def node_online(self,node_id):
+        return node_id == LOCAL_NODE or (isinstance(self.backend,BackendRouter) and bool(self.backend.for_node(node_id).status()))
+
+    def connect(self,row,address):
+        # Remote nodes own their SSH proxy; no customer traffic crosses the controller.
+        if row.get('node_id',LOCAL_NODE) == LOCAL_NODE:
+            self.forwarders[int(row['endpoint'])].set_target((address,22))
+        with self.lock:
+            self.forwarded.add(int(row['id']))
 
     def disconnect(self, row):
         endpoint = row.get('endpoint') or row.get('slot')
-        if endpoint in self.forwarders:
+        if row.get('node_id',LOCAL_NODE) == LOCAL_NODE and endpoint in self.forwarders:
             self.forwarders[endpoint].set_target(None)
         with self.lock:
             self.forwarded.discard(int(row['id']))
 
     def reconcile_runtime(self):
         for row in self.core.active_instances():
+            if row.get('node_id',LOCAL_NODE) != LOCAL_NODE:
+                continue  # Bounded batch observations, never N blocking SSH probes here.
             ident = int(row['id'])
             with self.lock:
                 if row['state'] != 'running' or ident in self.workers:
@@ -275,8 +333,15 @@ class Service:
                 self.core.observe_poweroff(ident)
                 self.disconnect(row)
 
-    def storage_status(self):
-        metrics = self.core.metrics()['used']
+    def storage_status(self,node_id=LOCAL_NODE):
+        metrics = self.core.metrics(node_id)['used']
+        if node_id != LOCAL_NODE:
+            remote = self.backend.for_node(node_id)
+            budget = self.core.nodes[node_id]
+            value = dict(remote.status().get('storage',{'totalGiB':0,'usedGiB':0,'freeGiB':0,'safetyGiB':128,'lowSpace':True,'mode':'节点未连接'}))
+            value.update(ready=remote.ready(), reservedGiB=metrics['systemDiskGiB']+metrics['dataDiskGiB'],
+                         budgetGiB=budget['storage_pool_budget'] or budget['system_disk_budget']+budget['data_disk_budget'])
+            return value
         with self.lock:
             if time.monotonic() - self.storage_cache[0] > 5:
                 path = ROOT if SIMULATION else Path(CONFIG['data_root'])
@@ -294,17 +359,22 @@ class Service:
         value['lowSpace'] = value['freeGiB'] < value['safetyGiB']
         return value
 
-    def check_mutation(self, requires_storage=False):
+    def check_mutation(self, requires_storage=False, node_id=LOCAL_NODE):
         if (ROOT / 'state' / 'storage-maintenance').exists():
             raise RuntimeError('存储正在维护迁移，现有实例继续运行，请稍后再操作')
-        if requires_storage and self.storage_status()['lowSpace']:
+        if requires_storage and (not self.node_online(node_id) or not self.image_ready(node_id)):
+            raise RuntimeError('所属节点或镜像尚未就绪，暂不能创建或启动')
+        if requires_storage and self.storage_status(node_id)['lowSpace']:
             raise RuntimeError('存储可用空间已触及安全余量，暂不能创建或启动，请联系管理员')
 
-    def image_ready(self):
-        try: return self.backend.ready()
+    def image_ready(self,node_id=LOCAL_NODE):
+        try: return self.backend.ready(node_id) if isinstance(self.backend,BackendRouter) else self.backend.ready()
         except (OSError, json.JSONDecodeError, RuntimeError): return False
 
-    def tunnel_ports(self):
+    def tunnel_ports(self,node_id=LOCAL_NODE):
+        if node_id != LOCAL_NODE:
+            config = next((node for node in self.node_configs if node['id'] == node_id),{})
+            return {int(key):int(value) for key,value in config.get('public_ports',{}).items()}
         # A fixed port map can be supplied after 1CatTunnel publishes its
         # endpoints. Until then the instance is still usable through the
         # host-side proxy, but the UI does not claim a public SSH endpoint.
@@ -317,6 +387,8 @@ class Service:
 
     def refresh_workers(self):
         for row in self.core.pending():
+            if not self.node_online(row.get('node_id',LOCAL_NODE)):
+                continue
             instance_id = int(row["id"])
             with self.lock:
                 if instance_id in self.workers: continue
@@ -326,6 +398,8 @@ class Service:
         # in-memory localhost forwarder targets are empty. Re-probe the guest
         # once and restore the tunnel without changing billing state.
         for row in self.core.active_instances():
+            if not self.node_online(row.get('node_id',LOCAL_NODE)):
+                continue
             if row["state"] != "running":
                 continue
             instance_id = int(row["id"])
@@ -364,9 +438,7 @@ class Service:
                 # power state; never shut down a workload merely for SSH delay.
                 print(f'forwarder {instance_id}: guest SSH not ready; will retry', flush=True)
                 return
-            self.forwarders[int(row["endpoint"])].set_target((address, 22))
-            with self.lock:
-                self.forwarded.add(instance_id)
+            self.connect(row,address)
         except Exception as exc:
             print(f"forwarder restore {instance_id} failed: {type(exc).__name__}: {exc}", flush=True)
         finally:
@@ -449,9 +521,7 @@ class Service:
                     if address: break
                     time.sleep(3)
                 if not address: raise RuntimeError("guest health check failed")
-                self.forwarders[int(row["endpoint"])].set_target((address, 22))
-                with self.lock:
-                    self.forwarded.add(instance_id)
+                self.connect(row,address)
                 latest = next((item for item in self.core.pending() if int(item["id"]) == instance_id), None)
                 if not latest or latest["desired_action"] != "start" or latest["state"] != "provisioning":
                     if latest:
@@ -510,6 +580,7 @@ class Service:
         ports = self.tunnel_ports()
         instances = []
         for row in rows:
+            ports = self.tunnel_ports(row['node_id'])
             instance_id = int(row["id"])
             mapped = {"provisioning":"creating","running":"running","stopping":"stopping","stopped":"stopped","error":"error","quarantined":"repair_required","deleting":"stopping"}
             current = mapped.get(row["state"], "error")
@@ -518,14 +589,17 @@ class Service:
             release_at = None
             if row['state'] in ('stopped', 'error') and not row['slot']:
                 release_at = (datetime.fromisoformat(row['last_activity_at']) + timedelta(hours=48)).isoformat()
-            connected = instance_id in self.forwarded and current == 'running'
+            online = self.node_online(row['node_id'])
+            connected = instance_id in self.forwarded and current == 'running' and online
             message = row['error'] or {
                 'running': '实例运行中' if connected else '实例运行中，SSH 入口正在检查',
                 'stopped': '已停止算力计费，磁盘继续保留',
                 'starting': '正在准备磁盘、启动系统并检查 SSH' if row['mode'] == 'headless' else '正在准备磁盘、启动系统并检查 GPU 与 SSH',
                 'stopping': '正在关闭实例并回收资源',
             }.get(current, '等待调度器处理')
-            shared = self.backend.shared_status({'id': str(instance_id)}) if hasattr(self.backend, 'shared_status') else {'enabled': False}
+            if not online:
+                message = '所属节点暂不可达；保留资源占用，算力计费不超过最后确认运行时间'
+            shared = self.backend.shared_status(self.backend_instance(row)) if hasattr(self.backend, 'shared_status') else {'enabled': False}
             if shared.get('enabled'):
                 shared_message = ('公共只读盘 /shared 已接入' if shared.get('state') == 'mounted' and current == 'running'
                                   else '公共盘待接入：正常关机后再开机' if current == 'running' and shared.get('state') == 'restart_required'
@@ -536,6 +610,7 @@ class Service:
                 "id": str(instance_id), "name": self.meta.get(str(instance_id), {}).get("name", f"gaudi-{instance_id}"),
                 "slot": row["slot"] or 0, "state": current, "vcpu": row["cpu"], "memoryGB": row["ram"] / 1000,
                 "mode": row["mode"],
+                "nodeId": row['node_id'], "nodeOnline": online,
                 "systemDiskGiB": row["sys"], "dataDiskGiB": row["data"], "image": "gaudi-ubuntu24.04",
                 "publicHost": self.public_host if row["endpoint"] in ports else None,
                 "publicPort": ports.get(row["endpoint"]), "username": "gpu" if current == "running" else None,
@@ -550,7 +625,7 @@ class Service:
                 "message": message,
                 "sharedStorage": shared,
             })
-        occupied = {int(row["slot"]): row for row in self.core.active_slots()}
+        occupied = {(row['node_id'],int(row["slot"])): row for row in self.core.active_slots()}
         slot_states = {
             "provisioning": "creating",
             "running": "running",
@@ -558,12 +633,23 @@ class Service:
             "quarantined": "repair_required",
             "deleting": "stopping",
         }
-        slots = [{
-            "slot": slot,
-            "state": slot_states.get(occupied[slot]["state"], "error") if slot in occupied else "available",
-            "instanceId": str(occupied[slot]["id"]) if slot in occupied and (admin_view or any(r['id'] == occupied[slot]['id'] for r in rows)) else None,
-            "gpu": f"Gaudi2 · HPU {slot}",
-        } for slot in range(1, SLOT_COUNT + 1)]
+        slots, nodes = [], []
+        headless_available = 0
+        for node_id,budget in self.core.nodes.items():
+            online = self.node_online(node_id) and self.image_ready(node_id)
+            metrics = self.core.metrics(node_id)
+            remaining = max(0,min(budget['headless_count']-metrics['active_headless'],
+                                  (budget['cpu_budget']-metrics['used']['cpu'])//HEADLESS_VCPU,
+                                  (budget['memory_budget']-metrics['used']['memoryMB'])//HEADLESS_MEMORY_MB)) if online else 0
+            headless_available += remaining
+            nodes.append({'id':node_id,'online':online,'imageReady':self.image_ready(node_id),
+                          'storage':self.storage_status(node_id),'headlessAvailable':remaining})
+            for slot in range(1,budget['slot_count']+1):
+                held = occupied.get((node_id,slot))
+                slots.append({'slot':slot,'nodeId':node_id,
+                              'state':slot_states.get(held['state'],'error') if held else ('available' if online else 'repair_required'),
+                              'instanceId':str(held['id']) if held and (admin_view or any(r['id']==held['id'] for r in rows)) else None,
+                              'gpu':f'{node_id} · Gaudi2 · HPU {slot}'})
         pricing = self.core.pricing()
         disk_price = pricing["extraDataDiskCnyPerGiBDay"]
         billing_detail = (
@@ -576,15 +662,12 @@ class Service:
         storage = self.storage_status()
         maintenance = (ROOT / 'state' / 'storage-maintenance').exists()
         metrics = self.core.metrics()
-        headless_available = max(0, min(self.headless_count - metrics['active_headless'],
-                                        (self.core.cpu_budget - metrics['used']['cpu']) // HEADLESS_VCPU,
-                                        (self.core.memory_budget - metrics['used']['memoryMB']) // HEADLESS_MEMORY_MB))
         return {
             'service': 'maintenance' if maintenance else ('ready' if image_ready and not storage['lowSpace'] else 'blocked'),
             'serviceMessage': '存储维护迁移中，现有实例不受影响' if maintenance else ('资源池就绪' if image_ready else '镜像或存储尚未通过检查'),
-            'account': self.core.profile(owner), 'slots': slots, 'instances': instances, 'storage': storage,
+            'account': self.core.profile(owner), 'slots': slots, 'nodes':nodes, 'instances': instances, 'storage': storage,
             'headless': {'available': headless_available, 'running': metrics['active_headless'],
-                         'capacity': self.headless_count, 'vcpu': HEADLESS_VCPU,
+                         'capacity': sum(b['headless_count'] for b in self.core.nodes.values()), 'vcpu': HEADLESS_VCPU,
                          'memoryGB': HEADLESS_MEMORY_MB / 1000, 'rateCentsPerHour': HEADLESS_RATE_CENTS},
             'image': {'id': 'gaudi-ubuntu24.04', 'name': 'Gaudi Ubuntu 24.04',
                       'version': str(manifest.get('version') or Path(CONFIG['image']).stem),
@@ -599,7 +682,10 @@ class Service:
             'updatedAt': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
 
     def order(self, owner, body, idempotency):
-        self.check_mutation(requires_storage=True)
+        node_id = body.get('nodeId',LOCAL_NODE)
+        if not isinstance(node_id,str) or node_id not in self.core.nodes:
+            raise ValueError('unknown node')
+        self.check_mutation(requires_storage=True,node_id=node_id)
         raw_name = str(body.get("name") or "").strip()
         if raw_name and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{2,31}", raw_name):
             raise ValueError("实例名称须为 3–32 位字母、数字、下划线或横线")
@@ -615,7 +701,7 @@ class Service:
         if isinstance(requested_memory, bool) or requested_memory != ram / 1000:
             raise ValueError(f"内存固定为 {ram / 1000:g} GB")
         with self.lock:
-            result = self.core.order(owner, {"cpu":cpu,"ram":ram,"sys":SYSTEM_DISK_GIB,"data":body.get("dataDiskGiB", 0),"mode":mode}, idempotency)
+            result = self.core.order(owner, {"cpu":cpu,"ram":ram,"sys":SYSTEM_DISK_GIB,"data":body.get("dataDiskGiB", 0),"mode":mode}, idempotency,node_id=node_id)
             ident = str(result["id"])
             self.meta.setdefault(ident, {})["name"] = raw_name or f"gaudi-{ident}"
             self.secrets.setdefault(ident, secrets.token_urlsafe(12))
@@ -778,21 +864,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 result=SERVICE.order(owner,body,self.headers.get('X-Idempotency-Key') or secrets.token_urlsafe(18)); self.json({'instance':result},202,set_cookie=cookie); return
             parts=[urllib.parse.unquote(x) for x in path.split('/') if x]
             if len(parts)==5 and parts[:3] in (['api','rental','instances'], ['api','admin','instances']):
-                SERVICE.check_mutation(requires_storage=parts[4] == 'start')
+                SERVICE.check_mutation()
                 mode = body.get('mode')
-                if parts[4] == 'start' and not SERVICE.image_ready():
-                    raise RuntimeError('镜像或计费价格未就绪，暂不能开机')
                 operation = SERVICE.core.admin_action if parts[1] == 'admin' else SERVICE.core.action
                 if parts[4] == 'start':
                     rows = SERVICE.core.admin_instances(owner) if parts[1] == 'admin' else SERVICE.core.list_instances(owner)
                     item = next((r for r in rows if r['id'] == int(parts[3])), None)
                     if item is None: raise KeyError('instance not found')
+                    SERVICE.check_mutation(requires_storage=True,node_id=item['node_id'])
+                    if not SERVICE.image_ready(item['node_id']):
+                        raise RuntimeError('所属节点镜像尚未就绪，暂不能开机')
                     selected_mode = mode if mode is not None else item['mode']
                     if selected_mode == 'gpu' and SERVICE.core.price() <= 0:
                         raise RuntimeError('GPU 计费价格未就绪，暂不能开机')
                     if selected_mode == 'headless' and not SIMULATION:
-                        ports = SERVICE.tunnel_ports()
-                        if any(n not in ports for n in range(9, 9 + SERVICE.headless_count)):
+                        ports = SERVICE.tunnel_ports(item['node_id'])
+                        if any(n not in ports for n in range(9, 9 + SERVICE.core.nodes[item['node_id']]['headless_count'])):
                             raise RuntimeError('无头 SSH 入口尚未配置完成，请联系管理员')
                 result=operation(owner,int(parts[3]),parts[4],mode=mode); SERVICE.refresh_workers(); self.json({'ok':True,'instance':result},202,set_cookie=cookie); return
             self.json({'error':'not_found'},404)

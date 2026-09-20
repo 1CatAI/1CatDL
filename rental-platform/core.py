@@ -22,6 +22,7 @@ from recharge_codes import RechargeCodeMixin
 ACTIVE_STATES = ("provisioning", "running", "stopping", "deleting", "quarantined")
 IDLE_RELEASE_SECONDS = 48 * 60 * 60
 MAX_SLOTS = 8
+LOCAL_NODE = "G2-002"
 FIXED_VCPU = 16
 # The product specification is decimal GB. Keep the scheduler and libvirt
 # boundary in integer MB so 62.5 GB is represented exactly, without a float or
@@ -61,6 +62,7 @@ class Core(RechargeCodeMixin):
         rate_cents_per_hour: int = 0,
         storage_pool_budget: int = 0,
         headless_count: int = 16,
+        nodes: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         for name, value in (
             ("memory_budget", memory_budget),
@@ -89,6 +91,20 @@ class Core(RechargeCodeMixin):
         if headless_count > 64:
             raise ValueError("headless_count must not exceed 64")
         self.headless_count = headless_count
+        local_budget = dict(memory_budget=memory_budget, cpu_budget=cpu_budget,
+                            system_disk_budget=system_disk_budget, data_disk_budget=data_disk_budget,
+                            storage_pool_budget=storage_pool_budget, slot_count=slot_count,
+                            headless_count=headless_count)
+        self.nodes = {LOCAL_NODE: local_budget}
+        for ident, config in (nodes or {}).items():
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", ident):
+                raise ValueError("invalid node identifier")
+            budget = {**local_budget, **{key: config[key] for key in local_budget if key in config}}
+            if any(type(value) is not int or value < 0 for value in budget.values()):
+                raise ValueError("invalid node budget")
+            if not 1 <= budget['slot_count'] <= 8 or budget['headless_count'] > 64:
+                raise ValueError("invalid node slot budget")
+            self.nodes[ident] = budget
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
@@ -167,8 +183,6 @@ class Core(RechargeCodeMixin):
                     UNIQUE(owner, idempotency),
                     CHECK(slot IS NULL OR slot BETWEEN 1 AND 8)
                 );
-                CREATE UNIQUE INDEX IF NOT EXISTS one_active_instance_per_slot
-                    ON instances(slot) WHERE slot IS NOT NULL;
                 CREATE TABLE IF NOT EXISTS usage_ledger (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     instance_id INTEGER NOT NULL REFERENCES instances(id),
@@ -226,7 +240,13 @@ class Core(RechargeCodeMixin):
             new_units_column = "metered_units" not in {r[1] for r in con.execute("PRAGMA table_info(usage_ledger)")}
             self._ensure_column(con, "usage_ledger", "metered_units", "INTEGER NOT NULL DEFAULT 0")
             con.execute("UPDATE instances SET endpoint=slot WHERE slot IS NOT NULL AND endpoint IS NULL")
-            con.execute("CREATE UNIQUE INDEX IF NOT EXISTS one_active_endpoint ON instances(endpoint) WHERE endpoint IS NOT NULL")
+            self._ensure_column(con, "instances", "node_id", "TEXT NOT NULL DEFAULT 'G2-002'")
+            self._ensure_column(con, "instances", "generation", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(con, "instances", "confirmed_through", "TEXT")
+            con.execute("DROP INDEX IF EXISTS one_active_instance_per_slot")
+            con.execute("DROP INDEX IF EXISTS one_active_endpoint")
+            con.execute("CREATE UNIQUE INDEX one_active_instance_per_slot ON instances(node_id,slot) WHERE slot IS NOT NULL")
+            con.execute("CREATE UNIQUE INDEX one_active_endpoint ON instances(node_id,endpoint) WHERE endpoint IS NOT NULL")
             if new_units_column:
                 con.execute("UPDATE usage_ledger SET metered_units=MAX(metered_cents,charged_cents)*?", (COMPUTE_UNITS_PER_CENT,))
 
@@ -717,6 +737,9 @@ class Core(RechargeCodeMixin):
             "slot": row["slot"],
             "mode": row["mode"],
             "endpoint": row["endpoint"],
+            "node_id": row["node_id"],
+            "generation": row["generation"],
+            "confirmed_through": row["confirmed_through"],
             "state": row["state"],
             "desired_action": row["desired_action"],
             "error": row["error"],
@@ -735,39 +758,45 @@ class Core(RechargeCodeMixin):
         data_disk: int,
         allocate: bool = True,
         mode: str = "gpu",
+        node_id: str = LOCAL_NODE,
     ) -> int | None:
+        if node_id not in self.nodes:
+            raise RuntimeError("instance node is not configured")
+        budget = self.nodes[node_id]
+        if node_id == LOCAL_NODE:
+            budget = {key: getattr(self, key) for key in budget}
         totals = con.execute(
             """SELECT COALESCE(SUM(CASE WHEN endpoint IS NOT NULL THEN cpu ELSE 0 END), 0) cpu,
                       COALESCE(SUM(CASE WHEN endpoint IS NOT NULL THEN ram ELSE 0 END), 0) ram,
                       COALESCE(SUM(CASE WHEN state != 'deleted' THEN sys_disk ELSE 0 END), 0) system_disk,
                       COALESCE(SUM(CASE WHEN state != 'deleted' THEN data_disk ELSE 0 END), 0) data_disk
-                 FROM instances"""
+                 FROM instances WHERE node_id=?""", (node_id,)
         ).fetchone()
-        if totals["cpu"] + cpu > self.cpu_budget:
+        if totals["cpu"] + cpu > budget['cpu_budget']:
             raise RuntimeError("CPU capacity unavailable")
-        if totals["ram"] + ram > self.memory_budget:
+        if totals["ram"] + ram > budget['memory_budget']:
             raise RuntimeError("memory capacity unavailable")
-        if self.storage_pool_budget and totals["system_disk"] + totals["data_disk"] + system_disk + data_disk > self.storage_pool_budget:
+        if budget['storage_pool_budget'] and totals["system_disk"] + totals["data_disk"] + system_disk + data_disk > budget['storage_pool_budget']:
             raise RuntimeError("storage pool capacity unavailable")
-        if not self.storage_pool_budget and totals["system_disk"] + system_disk > self.system_disk_budget:
+        if not budget['storage_pool_budget'] and totals["system_disk"] + system_disk > budget['system_disk_budget']:
             raise RuntimeError("system disk capacity unavailable")
-        if not self.storage_pool_budget and totals["data_disk"] + data_disk > self.data_disk_budget:
+        if not budget['storage_pool_budget'] and totals["data_disk"] + data_disk > budget['data_disk_budget']:
             raise RuntimeError("data disk capacity unavailable")
         if not allocate:
             return None
         if mode == "headless":
-            used = {r[0] for r in con.execute("SELECT endpoint FROM instances WHERE endpoint IS NOT NULL")}
-            available = next((n for n in range(MAX_SLOTS + 1, MAX_SLOTS + self.headless_count + 1) if n not in used), None)
+            used = {r[0] for r in con.execute("SELECT endpoint FROM instances WHERE node_id=? AND endpoint IS NOT NULL", (node_id,))}
+            available = next((n for n in range(MAX_SLOTS + 1, MAX_SLOTS + budget['headless_count'] + 1) if n not in used), None)
             if available is None:
                 raise RuntimeError("无头资源不足，暂时无法开机")
             return available
-        used = {row[0] for row in con.execute("SELECT slot FROM instances WHERE slot IS NOT NULL")}
+        used = {row[0] for row in con.execute("SELECT slot FROM instances WHERE node_id=? AND slot IS NOT NULL", (node_id,))}
         try:
-            return next(slot for slot in range(1, self.slot_count + 1) if slot not in used)
+            return next(slot for slot in range(1, budget['slot_count'] + 1) if slot not in used)
         except StopIteration as exc:
             raise RuntimeError("no active Gaudi2 slot available") from exc
 
-    def order(self, owner: str, spec: Mapping[str, Any], idempotency: str) -> dict[str, Any]:
+    def order(self, owner: str, spec: Mapping[str, Any], idempotency: str, node_id: str = LOCAL_NODE) -> dict[str, Any]:
         owner = self._owner(owner)
         if not isinstance(idempotency, str) or not idempotency.strip():
             raise ValueError("idempotency must be a non-empty string")
@@ -780,19 +809,21 @@ class Core(RechargeCodeMixin):
                 (owner, idempotency),
             ).fetchone()
             if existing is not None:
+                if existing['node_id'] != node_id:
+                    raise ValueError("idempotency key already used for a different node")
                 if (existing["cpu"], existing["ram"], existing["sys_disk"], existing["data_disk"]) != (cpu, ram, sys_disk, data_disk):
                     raise ValueError("idempotency key already used for a different instance specification")
                 return self._public(existing)
-            self._capacity(con, 0, 0, sys_disk, data_disk, allocate=False)
+            self._capacity(con, 0, 0, sys_disk, data_disk, allocate=False, node_id=node_id)
             now = _now()
             cur = con.execute(
                 """INSERT INTO instances
                    (owner, idempotency, cpu, ram, sys_disk, data_disk, free_test, slot, state,
-                    desired_action, opaque_secret, created_at, updated_at, last_activity_at, mode)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'stopped', NULL, ?, ?, ?, ?, ?)""",
+                    desired_action, opaque_secret, created_at, updated_at, last_activity_at, mode, node_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'stopped', NULL, ?, ?, ?, ?, ?, ?)""",
                 # Keep the legacy column value true for existing databases; billing is
                 # controlled by rate_cents_per_hour, not this historical flag.
-                (owner, idempotency, cpu, ram, sys_disk, data_disk, 1, opaque, now, now, now, mode),
+                (owner, idempotency, cpu, ram, sys_disk, data_disk, 1, opaque, now, now, now, mode, node_id),
             )
             row = con.execute("SELECT * FROM instances WHERE id = ?", (cur.lastrowid,)).fetchone()
         return self._public(row)
@@ -838,10 +869,10 @@ class Core(RechargeCodeMixin):
                     raise RuntimeError("legacy variable-spec instance must be recreated")
                 cpu = HEADLESS_VCPU if selected_mode == "headless" else FIXED_VCPU
                 ram = HEADLESS_MEMORY_MB if selected_mode == "headless" else FIXED_MEMORY_MB
-                endpoint = self._capacity(con, cpu, ram, 0, 0, mode=selected_mode)
+                endpoint = self._capacity(con, cpu, ram, 0, 0, mode=selected_mode, node_id=row['node_id'])
                 slot = endpoint if selected_mode == "gpu" else None
                 con.execute(
-                    "UPDATE instances SET slot=?, endpoint=?, mode=?, cpu=?, ram=?, state='provisioning', desired_action='start', error=NULL, updated_at=?, last_activity_at=? WHERE id=?",
+                    "UPDATE instances SET slot=?, endpoint=?, mode=?, cpu=?, ram=?, generation=generation+1, confirmed_through=NULL, state='provisioning', desired_action='start', error=NULL, updated_at=?, last_activity_at=? WHERE id=?",
                     (slot, endpoint, selected_mode, cpu, ram, _now(), _now(), instance_id),
                 )
             elif verb == "stop":
@@ -876,9 +907,9 @@ class Core(RechargeCodeMixin):
         """Return only scheduler-safe occupancy data, without tenant names."""
         with self._connection() as con:
             rows = con.execute(
-                "SELECT id, slot, state FROM instances WHERE slot IS NOT NULL ORDER BY slot"
+                "SELECT id, slot, state, node_id FROM instances WHERE slot IS NOT NULL ORDER BY node_id,slot"
             ).fetchall()
-        return [{"id": row["id"], "slot": row["slot"], "state": row["state"]} for row in rows]
+        return [dict(row) for row in rows]
 
     def active_instances(self) -> list[dict[str, Any]]:
         """Return worker-owned details for instances holding a GPU slot."""
@@ -912,8 +943,8 @@ class Core(RechargeCodeMixin):
                 raise RuntimeError("balance is zero; start cancelled")
             now = _now()
             con.execute(
-                "UPDATE instances SET state='running', desired_action=NULL, error=NULL, updated_at=?, last_activity_at=? WHERE id=?",
-                (now, now, instance_id),
+                "UPDATE instances SET state='running', desired_action=NULL, error=NULL, updated_at=?, last_activity_at=?, confirmed_through=? WHERE id=?",
+                (now, now, now, instance_id),
             )
             con.execute(
                 "INSERT INTO usage_ledger(instance_id, owner, opened_at, rate_cents_per_hour, last_billed_at) VALUES (?, ?, ?, ?, ?)",
@@ -1003,7 +1034,18 @@ class Core(RechargeCodeMixin):
         with self._transaction() as con:
             return self._settle(con, now or datetime.now(timezone.utc))
 
-    def observe_poweroff(self, instance_id: int):
+    def confirm_remote_runtime(self, instance_id: int, generation: int, observed: str) -> None:
+        """Only a successful, generation-matched node observation advances billing."""
+        stamp = datetime.fromisoformat(observed)
+        now = datetime.now(timezone.utc)
+        if stamp.tzinfo is None or stamp > now + timedelta(seconds=5):
+            raise ValueError("invalid node observation time")
+        observed = min(stamp, now).isoformat(timespec='microseconds')
+        with self._transaction() as con:
+            con.execute("UPDATE instances SET confirmed_through=? WHERE id=? AND generation=? AND node_id!=? AND (confirmed_through IS NULL OR confirmed_through<?)",
+                        (observed, instance_id, generation, LOCAL_NODE, observed))
+
+    def observe_poweroff(self, instance_id: int, generation: int | None = None):
         """Close compute metering as soon as libvirt proves the guest is off.
 
         Keep the slot until the worker confirms that the physical card has
@@ -1011,27 +1053,29 @@ class Core(RechargeCodeMixin):
         """
         with self._transaction() as con:
             row = self._worker_row(con, instance_id)
-            if row["state"] != "running":
-                return
+            if row["state"] != "running" or (generation is not None and row['generation'] != generation):
+                return False
             now = _now()
             self._settle(con, datetime.fromisoformat(now), instance_id)
             con.execute("UPDATE usage_ledger SET closed_at=? WHERE instance_id=? AND closed_at IS NULL", (now, instance_id))
             con.execute("UPDATE instances SET state='stopping', desired_action='stop', updated_at=?, error=? WHERE id=?",
                         (now, "检测到实例已关机，正在回收资源", instance_id))
             self._audit(con, "system", "guest_poweroff_detected", instance_id, {"owner": row["owner"]})
+            return True
 
     def _settle(self, con: sqlite3.Connection, now: datetime, instance_id: int | None = None) -> list[int]:
         now_text = now.isoformat(timespec="microseconds")
         stop_ids: list[int] = []
         rows = con.execute(
-            """SELECT l.*, i.state FROM usage_ledger l JOIN instances i ON i.id=l.instance_id
+            """SELECT l.*, i.state, i.node_id, i.confirmed_through FROM usage_ledger l JOIN instances i ON i.id=l.instance_id
                WHERE l.closed_at IS NULL AND (? IS NULL OR l.instance_id=?)""", (instance_id, instance_id)
         ).fetchall()
         for row in rows:
             rate = row["rate_cents_per_hour"]
             if rate <= 0:
                 continue
-            delta = now - datetime.fromisoformat(row["opened_at"])
+            through = now if row['node_id'] == LOCAL_NODE else min(now, datetime.fromisoformat(row['confirmed_through'] or row['opened_at']))
+            delta = through - datetime.fromisoformat(row["opened_at"])
             micros = max(0, (delta.days * 86400 + delta.seconds) * 1000000 + delta.microseconds)
             total_units = micros * rate
             total = total_units // COMPUTE_UNITS_PER_CENT
@@ -1124,7 +1168,7 @@ class Core(RechargeCodeMixin):
                 )
         return ids
 
-    def metrics(self) -> dict[str, Any]:
+    def metrics(self, node_id: str | None = None) -> dict[str, Any]:
         with self._connection() as con:
             totals = con.execute(
                 """SELECT COUNT(*) FILTER (WHERE slot IS NOT NULL) active,
@@ -1133,7 +1177,7 @@ class Core(RechargeCodeMixin):
                           COALESCE(SUM(CASE WHEN endpoint IS NOT NULL THEN ram ELSE 0 END), 0) ram,
                           COALESCE(SUM(CASE WHEN state != 'deleted' THEN sys_disk ELSE 0 END), 0) system_disk,
                           COALESCE(SUM(CASE WHEN state != 'deleted' THEN data_disk ELSE 0 END), 0) data_disk
-                     FROM instances"""
+                     FROM instances WHERE (? IS NULL OR node_id=?)""", (node_id, node_id)
             ).fetchone()
             states = {row["state"]: row["n"] for row in con.execute(
                 "SELECT state, COUNT(*) n FROM instances GROUP BY state"
@@ -1151,11 +1195,8 @@ class Core(RechargeCodeMixin):
                 "dataDiskGiB": totals["data_disk"],
             },
             "capacity": {
-                "slots": self.slot_count,
-                "cpu": self.cpu_budget,
-                "memoryMB": self.memory_budget,
-                "systemDiskGiB": self.system_disk_budget,
-                "dataDiskGiB": self.data_disk_budget,
+                **{public: sum(budget[key] for ident, budget in self.nodes.items() if node_id is None or ident == node_id)
+                   for public, key in {'slots':'slot_count','cpu':'cpu_budget','memoryMB':'memory_budget','systemDiskGiB':'system_disk_budget','dataDiskGiB':'data_disk_budget'}.items()},
             },
             "states": states,
             "open_usage_intervals": open_intervals,

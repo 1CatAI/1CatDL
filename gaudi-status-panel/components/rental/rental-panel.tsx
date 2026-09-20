@@ -31,6 +31,8 @@ type InstanceMode = 'gpu' | 'headless';
 
 type RentalInstance = {
   id: string;
+  nodeId?: string;
+  nodeOnline?: boolean;
   name: string;
   slot: number;
   mode?: InstanceMode;
@@ -69,8 +71,10 @@ type RentalState = {
   service: 'ready' | 'degraded' | 'blocked' | 'maintenance';
   serviceMessage: string;
   account: RentalAccount;
+  nodes?: Array<{ id: string; online: boolean; imageReady: boolean; headlessAvailable: number; storage?: RentalState['storage'] }>;
   slots: Array<{
     slot: number;
+    nodeId?: string;
     state: SlotState;
     instanceId: string | null;
     gpu: string;
@@ -170,6 +174,7 @@ export function RentalPanel() {
   const [state, setState] = useState<RentalState>(initialState);
   const [dataDiskGiB, setDataDiskGiB] = useState(0);
   const [mode, setMode] = useState<InstanceMode>('gpu');
+  const [nodeId, setNodeId] = useState('G2-002');
   const [instanceName, setInstanceName] = useState('gaudi-dev');
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -246,11 +251,22 @@ export function RentalPanel() {
   if (account === null) return <AuthGate mode={authMode} setMode={setAuthMode} name={authName} setName={setAuthName} password={authPassword} setPassword={setAuthPassword} submitting={authSubmitting} onSubmit={() => void submitAuth()} notice={notice} />;
 
   const availableSlots = state.slots.filter((slot) => slot.state === 'available').length;
-  const busySlots = state.slots.length - availableSlots;
-  const canOrder = state.service === 'ready' && state.image.ready && !submitting;
+  const busySlots = state.slots.filter((slot) => slot.instanceId || ['creating', 'running', 'stopping'].includes(slot.state)).length;
+  const selectedNode = state.nodes?.find((node) => node.id === nodeId);
+  const canOrder = state.service !== 'maintenance' && (selectedNode ? selectedNode.online && selectedNode.imageReady && !selectedNode.storage?.lowSpace : state.service === 'ready' && state.image.ready) && !submitting;
   const activeInstance = state.instances.find((row) => row.mode !== 'headless' && ['creating', 'starting', 'running', 'stopping', 'repair_required'].includes(row.state));
   const hourlyCost = state.instances.reduce((sum, row) => sum + (['running', 'stopping', 'repair_required'].includes(row.state) ? row.rateCentsPerHour ?? 0 : 0) + (row.storageCnyPerDay ?? 0) * 100 / 24, 0);
-  const startReason = (instance: RentalInstance, selected: InstanceMode) => state.service !== 'ready' ? state.serviceMessage : state.account.balanceCents <= 0 ? '余额不足，请先充值' : selected === 'headless' ? (state.headless?.available ?? 0) <= 0 ? '无头资源不足，暂时无法开机' : '' : activeInstance && activeInstance.id !== instance.id ? '请先关闭当前 GPU 实例' : availableSlots === 0 && !instance.slot ? 'GPU 资源不足，暂时无法开机' : '';
+  const startReason = (instance: RentalInstance, selected: InstanceMode) => {
+    const node = state.nodes?.find((item) => item.id === (instance.nodeId || 'G2-002'));
+    if (state.service === 'maintenance') return state.serviceMessage;
+    if (instance.nodeOnline === false || (node && (!node.online || !node.imageReady))) return '所属节点暂不可用，请稍后重试';
+    if (node?.storage?.lowSpace) return '所属节点存储空间不足';
+    if (!node && state.service !== 'ready') return state.serviceMessage;
+    if (state.account.balanceCents <= 0) return '余额不足，请先充值';
+    if (selected === 'headless') return (node?.headlessAvailable ?? state.headless?.available ?? 0) <= 0 ? '所属节点无头资源不足' : '';
+    if (activeInstance && activeInstance.id !== instance.id) return '请先关闭当前 GPU 实例';
+    return state.slots.some((slot) => (slot.nodeId || 'G2-002') === (instance.nodeId || 'G2-002') && slot.state === 'available') || !!instance.slot ? '' : '所属节点 GPU 资源不足，暂时无法开机';
+  };
   const estimatedHours = hourlyCost > 0 ? state.account.balanceCents / hourlyCost : null;
   const visibleInstances = state.instances.filter((row) => (filter === 'all' || row.state === filter) && `${row.name} ${row.id}`.toLowerCase().includes(search.toLowerCase()));
 
@@ -264,13 +280,13 @@ export function RentalPanel() {
     setSubmitting(true);
     setNotice(null);
     try {
-      const intent = JSON.stringify({ name: instanceName.trim(), dataDiskGiB, mode });
+      const intent = JSON.stringify({ name: instanceName.trim(), dataDiskGiB, mode, nodeId });
       if (orderIntent.current !== intent) { orderKey.current = null; orderIntent.current = intent; }
       orderKey.current ??= requestKey();
       await rentalRequest('/api/rental/order', {
         method: 'POST',
         headers: { 'X-Idempotency-Key': orderKey.current },
-        body: JSON.stringify({ name: instanceName.trim() || 'gaudi-dev', mode, vcpu: mode === 'headless' ? 2 : 16, memoryGB: mode === 'headless' ? 4 : 62.5, dataDiskGiB, image: state.image.id }),
+        body: JSON.stringify({ name: instanceName.trim() || 'gaudi-dev', mode, nodeId, vcpu: mode === 'headless' ? 2 : 16, memoryGB: mode === 'headless' ? 4 : 62.5, dataDiskGiB, image: state.image.id }),
       });
       orderKey.current = null;
       setTab('instances');
@@ -325,7 +341,7 @@ export function RentalPanel() {
         </header>
 
         <section className="rental-hero">
-          <div><div className="rental-eyebrow">YOUR COMPUTE, READY WHEN YOU ARE</div><h1>算力工作台<span className="rental-beta">G2-002</span></h1><p>独占 Gaudi2 · 16 核 CPU · 62.5 GB 内存 · 50 GiB 系统盘</p></div>
+          <div><div className="rental-eyebrow">YOUR COMPUTE, READY WHEN YOU ARE</div><h1>算力工作台<span className="rental-beta">{state.nodes?.length ?? 1} 节点</span></h1><p>独占 Gaudi2 · 16 核 CPU · 62.5 GB 内存 · 50 GiB 系统盘</p></div>
           <div className="rental-hero-badge"><ShieldCheck size={18} /><span>GPU 计算 · 无头配置环境<br /><small>GPU 每人同时 1 台 · 无头可同时多台</small></span></div>
         </section>
 
@@ -341,7 +357,7 @@ export function RentalPanel() {
         {account.role === 'customer' && <RechargeContactBanner />}
         <div className="rental-overview">
           <div><span><Wallet size={16} />账户余额</span><strong>{formatMoney(state.account.balanceCents)}</strong><small>{estimatedHours === null ? '按实际运行和磁盘保留时间计费' : `按当前用量约可用 ${estimatedHours.toFixed(1)} 小时，仅供参考`}</small></div>
-          <div><span><Cpu size={16} />GPU 资源</span><strong>{availableSlots}<em> / 8 可用</em></strong><small>{activeInstance ? `你的实例 #${activeInstance.id} 正在占用资源` : '创建不占卡，开机时自动分配'}</small></div>
+          <div><span><Cpu size={16} />GPU 资源</span><strong>{availableSlots}<em> / {state.slots.length} 可用</em></strong><small>{activeInstance ? `你的实例 #${activeInstance.id} 正在占用资源` : '创建不占卡，开机时自动分配'}</small></div>
           <div><span><Clock3 size={16} />保留规则</span><strong>48<em> 小时</em></strong><small>关机后保留两天，届时自动删除全部磁盘</small></div>
         </div>
 
@@ -354,12 +370,13 @@ export function RentalPanel() {
         {tab === 'admin' && account.role === 'admin' && <AdminRegistrationBonus />}
         {tab === 'admin' && account.role === 'admin' && <AdminAccountPanel onChanged={() => setCustomerRevision((value) => value + 1)} />}
         {account.role === 'admin' && <div hidden={tab !== 'admin'}><AdminCodePanel active={tab === 'admin'} customerRevision={customerRevision} /></div>}
-        {tab === 'admin' && account.role === 'admin' && <><AdminPanel currentRateCents={state.billing.rateCentsPerHour ?? 0} customerRevision={customerRevision} onNotice={setNotice} /><AdminFleet storage={state.storage} /><LedgerPanel admin /></>}
+        {tab === 'admin' && account.role === 'admin' && <><AdminPanel currentRateCents={state.billing.rateCentsPerHour ?? 0} customerRevision={customerRevision} onNotice={setNotice} /><AdminFleet storage={state.storage} nodes={state.nodes} /><LedgerPanel admin /></>}
 
         {tab === 'create' && <div className="rental-grid">
           <section className="rental-card rental-order-card">
             <div className="rental-card-head"><div><div className="rental-kicker">01 / LAUNCH</div><h2>创建实例</h2></div><span className="rental-step-chip">一步下单</span></div>
             <div className="rental-form">
+              <fieldset className="rental-mode-picker"><legend>实例所属节点</legend><div>{(state.nodes ?? [{ id: 'G2-002', online: state.service === 'ready', imageReady: state.image.ready }]).map((node) => <button type="button" key={node.id} aria-pressed={nodeId === node.id} disabled={!node.online || !node.imageReady} onClick={() => setNodeId(node.id)}><Server size={19} /><strong>{node.id}</strong><span>{node.online && node.imageReady ? `${state.slots.filter((slot) => (slot.nodeId || 'G2-002') === node.id && slot.state === 'available').length} / 8 GPU 可用` : '暂不可用'}</span></button>)}</div><small>实例和磁盘固定保存在所选节点；两机公共模型各有本地副本。每个账户全平台最多运行 1 台 GPU 实例，无头实例可多开。</small></fieldset>
               <fieldset className="rental-mode-picker"><legend>启动模式</legend><div>
                 <button type="button" aria-pressed={mode === 'gpu'} onClick={() => setMode('gpu')}><Cpu size={19} /><strong>GPU 模式</strong><span>16 vCPU · 62.5 GB · Gaudi2</span><b>{formatMoney(state.billing.rateCentsPerHour ?? 0)} / 小时</b></button>
                 <button type="button" aria-pressed={mode === 'headless'} onClick={() => setMode('headless')}><Terminal size={19} /><strong>无头模式</strong><span>2 vCPU · 4 GB · 无显卡</span><b>¥0.08 / 小时</b></button>
@@ -382,8 +399,8 @@ export function RentalPanel() {
 
           <section className="rental-card rental-pool-card">
             <div className="rental-card-head"><div><div className="rental-kicker">02 / RESOURCE POOL</div><h2>GPU 资源池</h2></div><span className="rental-pool-count"><b>{busySlots}</b> / {state.slots.length} 使用中</span></div>
-            <div className="rental-slot-grid">{state.slots.map((slot) => <div className={`rental-slot ${slot.state === 'available' ? 'rental-slot-free' : 'rental-slot-busy'}`} key={slot.slot}><div className="rental-slot-top"><span className="rental-slot-number">GPU {String(slot.slot).padStart(2, '0')}</span><span className={stateClass(slot.state)}><i />{stateLabel(slot.state)}</span></div><div className="rental-slot-gpu"><Server size={18} /><span>{slot.gpu}</span></div>{slot.instanceId && <small>实例 {slot.instanceId}</small>}</div>)}</div>
-            <div className="rental-pool-foot"><div><i className="rental-legend-free" />可分配</div><div><i className="rental-legend-busy" />已占用或处理中</div><span>最多同时运行 8 台 GPU 实例</span></div>
+            <div className="rental-slot-grid">{state.slots.map((slot) => <div className={`rental-slot ${slot.state === 'available' ? 'rental-slot-free' : 'rental-slot-busy'}`} key={`${slot.nodeId || 'G2-002'}:${slot.slot}`}><div className="rental-slot-top"><span className="rental-slot-number">GPU {String(slot.slot).padStart(2, '0')}</span><span className={stateClass(slot.state)}><i />{stateLabel(slot.state)}</span></div><div className="rental-slot-gpu"><Server size={18} /><span>{slot.gpu}</span></div>{slot.instanceId && <small>实例 {slot.instanceId}</small>}</div>)}</div>
+            <div className="rental-pool-foot"><div><i className="rental-legend-free" />可分配</div><div><i className="rental-legend-busy" />已占用或处理中</div><span>{state.nodes?.length ?? 1} 节点 · 共 {state.slots.length} 张卡</span></div>
             <div className="rental-headless-capacity"><Terminal size={19} /><div><strong>无头模式 · ¥0.08/h</strong><span>当前可启动 {state.headless?.available ?? 0} 台 · 2 vCPU / 4 GB · 同客户可多开</span></div></div>
           </section>
         </div>}
@@ -396,7 +413,7 @@ export function RentalPanel() {
 }
 
 function RentalBrand() {
-  return <div className="rental-brand"><BrandLogo /><div className="rental-brand-detail"><strong>1CatDL</strong><span>GAUDI GPU CLOUD / G2-002</span></div></div>;
+  return <div className="rental-brand"><BrandLogo /><div className="rental-brand-detail"><strong>1CatDL</strong><span>GAUDI GPU CLOUD</span></div></div>;
 }
 
 type RegistrationBonusSettings = { bonusCents: number; maxBonusCents: number };
@@ -828,6 +845,7 @@ function InstanceRow({ instance, actionId, onAction, gpuStartReason = '', headle
       </div>
     </div>
     <div className="rental-instance-meta">
+      <span><Server size={14} />{instance.nodeId || 'G2-002'}{instance.nodeOnline === false ? ' · 暂离线' : ''}</span>
       <span><Cpu size={14} />{instance.vcpu} vCPU</span><span><MemoryStick size={14} />{instance.memoryGB} GB</span><span><HardDrive size={14} />50 GiB 系统盘{instance.dataDiskGiB ? ` + ${instance.dataDiskGiB} GiB 数据盘` : ''}</span>
       <span>{stopped ? '上次选择' : '本次运行'} {formatMoney(instance.rateCentsPerHour ?? 0)}/h</span>
     </div>
@@ -900,7 +918,7 @@ function LedgerPanel({ admin = false }: { admin?: boolean }) {
   </section>;
 }
 
-function AdminFleet({ storage }: { storage?: RentalState['storage'] }) {
+function AdminFleet({ storage, nodes }: { storage?: RentalState['storage']; nodes?: RentalState['nodes'] }) {
   const [instances, setInstances] = useState<RentalInstance[]>([]);
   const [events, setEvents] = useState<Array<{ id: number; actor: string; event: string; target: string; detail: string; created_at: string }>>([]);
   const [error, setError] = useState('');
@@ -929,7 +947,7 @@ function AdminFleet({ storage }: { storage?: RentalState['storage'] }) {
   };
   const labels: Record<string, string> = { customer_deleted: '删除客户账户', customer_restored: '恢复客户账户', registration_bonus_changed: '修改注册赠金', registration_bonus_granted: '发放注册赠金', price_changed: '修改卡时价', instance_start: '启动实例', instance_stop: '关闭实例', instance_delete: '释放实例', guest_poweroff_detected: '检测到关机', recharge_codes_issued: '生成充值码', recharge_codes_revoked: '作废充值码', recharge_code_redeemed: '兑换入账' };
   return <>
-    {storage && <section className="rental-card rental-storage"><div><span className="rental-kicker">INTEL NVME / SHARED STORAGE</span><h2>存储池</h2><p>{storage.mode} · 实际已用 {storage.usedGiB.toFixed(1)} GiB / {storage.totalGiB.toFixed(1)} GiB</p><progress aria-label="磁盘实际使用率" value={storage.usedGiB} max={storage.totalGiB} /><small>规格预留 {storage.reservedGiB} / {storage.budgetGiB} GiB · 物理剩余 {storage.freeGiB.toFixed(1)} GiB · 安全余量 {storage.safetyGiB} GiB</small>{storage.lowSpace && <p className="rental-text-error">物理空间不足，新建及开机已受限，请检查磁盘。</p>}</div></section>}
+    {(nodes ?? [{ id: 'G2-002', online: true, storage }]).map((node) => node.storage && <section key={node.id} className="rental-card rental-storage"><div><span className="rental-kicker">{node.id} / INTEL NVME</span><h2>{node.id} 存储池{!node.online ? ' · 暂离线' : ''}</h2><p>{node.storage.mode} · 实际已用 {node.storage.usedGiB.toFixed(1)} GiB / {node.storage.totalGiB.toFixed(1)} GiB</p><progress aria-label={`${node.id} 磁盘实际使用率`} value={node.storage.usedGiB} max={node.storage.totalGiB || 1} /><small>规格预留 {node.storage.reservedGiB} / {node.storage.budgetGiB} GiB · 物理剩余 {node.storage.freeGiB.toFixed(1)} GiB · 安全余量 {node.storage.safetyGiB} GiB</small>{node.storage.lowSpace && <p className="rental-text-error">节点离线或物理空间不足，新建及开机已受限。</p>}</div></section>)}
     <section className="rental-card rental-instances-card"><div className="rental-card-head"><div><div className="rental-kicker">PLATFORM INSTANCES</div><h2>全部客户实例</h2></div><span>{instances.length} 台保留</span></div><div className="rental-list-tools"><label><Search size={15} /><input aria-label="搜索客户实例" placeholder="搜索账户、实例名或 ID" value={query} onChange={(event) => setQuery(event.target.value)} /></label></div>{error && <p className="rental-inline-error">{error}</p>}{instances.filter((row) => `${row.owner} ${row.name} ${row.id}`.toLowerCase().includes(query.toLowerCase())).map((row) => <InstanceRow key={row.id} instance={row} actionId={actionId} onAction={action} />)}</section>
     <details className="rental-card rental-audit"><summary>操作审计 · 最近 {events.length} 条</summary><div className="rental-table-wrap"><table className="rental-table"><thead><tr><th>时间</th><th>操作者</th><th>操作</th><th>目标 / 详情</th></tr></thead><tbody>{events.map((row) => <tr key={row.id}><td>{formatDate(row.created_at)}</td><td>{row.actor}</td><td>{labels[row.event] ?? row.event}</td><td>{row.target} · {row.detail}</td></tr>)}</tbody></table></div></details>
     {confirmation && <ConfirmDialog title="确认管理员操作" danger={confirmation.operation === 'delete'} detail={`将对客户实例 #${confirmation.id} 执行${confirmation.operation === 'delete' ? '永久释放，系统盘和数据盘将删除' : confirmation.operation === 'stop' ? '关机，运行任务将中断' : `${confirmation.mode === 'headless' ? '无头开机，¥0.08/h' : 'GPU 开机'}，成功后从客户余额计费`}。此操作将记录到审计日志。`} onCancel={() => setConfirmation(null)} onConfirm={() => void action(confirmation.id, confirmation.operation, confirmation.mode, true)} />}

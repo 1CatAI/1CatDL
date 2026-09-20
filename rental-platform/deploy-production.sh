@@ -48,7 +48,7 @@ lock_deployment() {
 }
 
 package_check() {
-  local required=(core.py recharge_codes.py backend.py shared_storage.py shared-storage/1cat-mount-shared shared-storage/1cat-shared-storage.service server.py adminctl.py deploy-production.sh prepare-image.sh 1cat-rental.service public/index.html public/rental/index.html)
+  local required=(core.py recharge_codes.py backend.py shared_storage.py remote_backend.py shared-storage/1cat-mount-shared shared-storage/1cat-shared-storage.service server.py adminctl.py deploy-production.sh prepare-image.sh 1cat-rental.service public/index.html public/rental/index.html)
   local item
   for item in "${required[@]}"; do
     [[ -f "$SCRIPT_DIR/$item" ]] || { echo "release file missing: $item" >&2; return 1; }
@@ -174,6 +174,7 @@ displace_program() {
 
 guard_account_rollback() {
   local backup=$1
+  guard_multinode_rollback "$backup" || return
   if grep -q 'def delete_customer(' "$backup/program/core.py" 2>/dev/null; then return 0; fi
   if grep -q 'def delete_customer(' "$ROOT/core.py" "$SCRIPT_DIR/core.py" 2>/dev/null &&
      [[ -f "$DATA/state/core.sqlite3" ]]; then
@@ -185,6 +186,23 @@ sys.exit(1 if 'deleted_at' in columns and db.execute('SELECT 1 FROM users WHERE 
 PY
     then
       echo 'deleted customer accounts exist; this backup would re-enable them. Use ui-rollback or an account-deletion-compatible release.' >&2
+      return 1
+    fi
+  fi
+}
+
+guard_multinode_rollback() {
+  local backup=$1
+  if [[ -f "$backup/program/remote_backend.py" ]]; then return 0; fi
+  if [[ -f "$DATA/state/core.sqlite3" && -f "$ROOT/remote_backend.py" ]]; then
+    if ! python3 - "$DATA/state/core.sqlite3" <<'PY'
+import sqlite3,sys
+db=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True)
+columns={r[1] for r in db.execute('PRAGMA table_info(instances)')}
+sys.exit(1 if 'node_id' in columns and db.execute("SELECT 1 FROM instances WHERE node_id!='G2-002' LIMIT 1").fetchone() else 0)
+PY
+    then
+      echo 'remote-node instances exist; a single-node release could operate on the wrong host. Use ui-rollback or a multi-node-compatible release.' >&2
       return 1
     fi
   fi

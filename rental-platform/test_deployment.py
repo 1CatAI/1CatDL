@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -42,7 +43,7 @@ systemctl() {
     start)
       if [[ "$QA_MODE" == start-fail && -f "$ROOT/new-version" ]]; then return 51; fi
       touch "$BASE/active"
-      if [[ -f "$ROOT/new-version" ]]; then
+      if [[ -f "$ROOT/new-version" && ! -f "$BASE/use-real-db" ]]; then
         printf 'new-business-events\n' >"$DATA/state/core.sqlite3"
       fi ;;
     daemon-reload)
@@ -159,6 +160,28 @@ PY
     rollback_release "$requested"
     [[ -f "$ROOT/old-version" && -f "$BASE/active" ]]
   fi
+elif [[ "$QA_MODE" == multinode-rollback || "$QA_MODE" == multinode-rollback-empty ]]; then
+  install_release
+  requested=$RECOVERY_BACKUP
+  printf 'multi-node transport\n' >"$ROOT/remote_backend.py"
+  python3 - "$DATA/state/core.sqlite3" "$QA_MODE" <<'PY'
+from pathlib import Path
+import sqlite3,sys
+path=Path(sys.argv[1])
+path.unlink()
+with sqlite3.connect(path) as db:
+    db.execute('CREATE TABLE instances(node_id TEXT)')
+    db.execute('INSERT INTO instances VALUES (?)',('G2-003' if sys.argv[2]=='multinode-rollback' else 'G2-002',))
+PY
+  if [[ "$QA_MODE" == multinode-rollback ]]; then
+    if rollback_release "$requested"; then exit 90; fi
+    if restore_backup "$requested"; then exit 91; fi
+    [[ -f "$ROOT/new-version" && -f "$BASE/active" ]]
+  else
+    PROGRAM_CHANGED=0
+    rollback_release "$requested"
+    [[ -f "$ROOT/old-version" && -f "$BASE/active" ]]
+  fi
 elif [[ "$QA_MODE" == migrated-rollback ]]; then
   install_release
   requested=$RECOVERY_BACKUP
@@ -193,11 +216,15 @@ class DeploymentTests(unittest.TestCase):
         (self.base / "program/old-version").write_text("old")
         # Legacy deployments deliberately have no deploy-production.sh.
         (self.base / "program/server.py").write_text("old code")
+        # Other fault-injection cases use text sentinels for the database and
+        # already-compatible code. Only the multi-node rollback cases below
+        # model a single-node backup, using a real SQLite database.
+        (self.base / "program/remote_backend.py").write_text("prior compatible transport")
         (self.base / "service.unit").write_text("old unit")
         (self.base / "active").touch()
         (self.base / "data/state/core.sqlite3").write_text("old-business-events\n")
         release = self.base / "release"
-        for name in ("core.py", "recharge_codes.py", "backend.py", "shared_storage.py", "shared-storage/1cat-mount-shared", "shared-storage/1cat-shared-storage.service", "server.py", "adminctl.py",
+        for name in ("core.py", "recharge_codes.py", "backend.py", "shared_storage.py", "remote_backend.py", "shared-storage/1cat-mount-shared", "shared-storage/1cat-shared-storage.service", "server.py", "adminctl.py",
                      "deploy-production.sh", "prepare-image.sh", "1cat-rental.service",
                      "public/index.html", "public/rental/index.html", "new-version"):
             (release / name).parent.mkdir(parents=True, exist_ok=True)
@@ -211,6 +238,8 @@ class DeploymentTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def invoke(self, mode):
+        if mode in ('multinode-rollback','multinode-rollback-empty'):
+            (self.base / 'program/remote_backend.py').unlink()
         env = {key: value for key, value in os.environ.items()
                if not key.startswith("RENTAL_")}
         env.update(QA_SOURCE=SOURCE.resolve().as_posix(), QA_BASE=self.base.as_posix(),
@@ -248,6 +277,12 @@ class DeploymentTests(unittest.TestCase):
                 self.assertNotEqual(self.invoke(mode).returncode, 0)
                 self.assert_old_healthy()
                 self.assertNotIn("stop ", (self.base / "commands.log").read_text())
+
+    def test_missing_remote_transport_rejected_before_stopping(self):
+        (self.base / 'release/remote_backend.py').unlink()
+        self.assertNotEqual(self.invoke('ok').returncode,0)
+        self.assertIn('release file missing: remote_backend.py',self.last_output)
+        self.assert_old_healthy()
 
     def test_backup_failure_restarts_old_service_without_replacement(self):
         self.assertNotEqual(self.invoke("backup-fail").returncode, 0)
@@ -304,6 +339,15 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(self.invoke('migrated-rollback').returncode, 0, self.last_output)
         self.assertIn('cannot safely restore the controller', self.last_output)
 
+    def test_remote_instances_block_single_node_rollback_and_failure_recovery(self):
+        self.assertEqual(self.invoke('multinode-rollback').returncode,0,self.last_output)
+        self.assertEqual(self.last_output.count('could operate on the wrong host'),2)
+        self.assertTrue((self.base/'program/new-version').exists())
+
+    def test_single_node_rollback_allowed_before_any_remote_instance(self):
+        self.assertEqual(self.invoke('multinode-rollback-empty').returncode,0,self.last_output)
+        self.assert_old_healthy()
+
     def test_ui_rollback_keeps_controller_and_wallet(self):
         self.assertEqual(self.invoke('ui-rollback').returncode, 0, self.last_output)
         self.assertEqual((self.base / 'data/state/core.sqlite3').read_text(), 'post-install-credit\n')
@@ -333,6 +377,11 @@ class DeploymentTests(unittest.TestCase):
         shutil.rmtree(self.base / "program")
         (self.base / "service.unit").unlink()
         (self.base / "active").unlink()
+        (self.base / 'use-real-db').touch()
+        (self.base / 'data/state/core.sqlite3').unlink()
+        with sqlite3.connect(self.base / 'data/state/core.sqlite3') as db:
+            db.execute('CREATE TABLE instances(node_id TEXT)')
+        db.close()
         self.assertNotEqual(self.invoke("health-fail").returncode, 0)
         self.assertFalse((self.base / "program").exists())
         self.assertFalse((self.base / "service.unit").exists())
