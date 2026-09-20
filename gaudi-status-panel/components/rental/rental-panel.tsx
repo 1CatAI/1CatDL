@@ -350,6 +350,7 @@ export function RentalPanel() {
           {loading ? <div className="rental-empty"><LoaderCircle className="rental-spin" size={22} />读取实例状态…</div> : visibleInstances.length === 0 ? <div className="rental-empty"><Server size={24} /><span>{state.instances.length ? '没有匹配的实例' : '还没有实例，创建你的第一个算力环境。'}</span></div> : <div className="rental-instance-list">{visibleInstances.map((instance) => <InstanceRow key={instance.id} instance={instance} actionId={actionId} onAction={action} gpuStartReason={startReason(instance, 'gpu')} headlessStartReason={startReason(instance, 'headless')} gpuRate={state.billing.rateCentsPerHour ?? 0} />)}</div>}
         </section>}
         {tab === 'wallet' && <>{account.role === 'customer' && <RedeemCodePanel onRedeemed={() => { setWalletRevision((value) => value + 1); void refresh(); }} />}<LedgerPanel key={walletRevision} /></>}
+        {tab === 'admin' && account.role === 'admin' && <AdminRegistrationBonus />}
         {account.role === 'admin' && <div hidden={tab !== 'admin'}><AdminCodePanel active={tab === 'admin'} /></div>}
         {tab === 'admin' && account.role === 'admin' && <><AdminPanel currentRateCents={state.billing.rateCentsPerHour ?? 0} onNotice={setNotice} /><AdminFleet storage={state.storage} /><LedgerPanel admin /></>}
 
@@ -396,6 +397,84 @@ function RentalBrand() {
   return <div className="rental-brand"><BrandLogo /><div className="rental-brand-detail"><strong>1CatDL</strong><span>GAUDI GPU CLOUD / G2-002</span></div></div>;
 }
 
+type RegistrationBonusSettings = { bonusCents: number; maxBonusCents: number };
+
+function AdminRegistrationBonus() {
+  const [settings, setSettings] = useState<RegistrationBonusSettings | null>(null);
+  const [amount, setAmount] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<{ error: boolean; text: string } | null>(null);
+  const [pending, setPending] = useState<{ cents: number; expectedCents: number } | null>(null);
+  const inFlight = useRef(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setMessage(null);
+    try {
+      const next = await rentalRequest<RegistrationBonusSettings>('/api/admin/registration-bonus');
+      setSettings(next);
+      setAmount((next.bonusCents / 100).toFixed(2));
+    } catch (error) {
+      setMessage({ error: true, text: error instanceof Error ? error.message : '读取注册赠金设置失败' });
+    } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    const initial = window.setTimeout(() => { void load(); }, 0);
+    return () => window.clearTimeout(initial);
+  }, [load]);
+
+  const confirmSave = () => {
+    if (!settings || loading || busy) return;
+    if (!/^(?:0|[1-9]\d{0,4})(?:\.\d{1,2})?$/.test(amount.trim())) {
+      setMessage({ error: true, text: '请输入 0–10000 元的金额，最多两位小数；0 表示关闭赠送。' });
+      return;
+    }
+    const [yuan, fraction = ''] = amount.trim().split('.');
+    const cents = Number(yuan) * 100 + Number(fraction.padEnd(2, '0'));
+    if (cents > settings.maxBonusCents) {
+      setMessage({ error: true, text: `注册赠金不能超过 ${formatMoney(settings.maxBonusCents)}。` });
+      return;
+    }
+    setMessage(null);
+    setPending({ cents, expectedCents: settings.bonusCents });
+  };
+
+  const save = async () => {
+    if (!pending || inFlight.current) return;
+    const confirmed = pending;
+    inFlight.current = true;
+    setPending(null);
+    setBusy(true);
+    try {
+      const next = await rentalRequest<RegistrationBonusSettings>('/api/admin/registration-bonus', {
+        method: 'POST', body: JSON.stringify(confirmed),
+      });
+      setSettings(next);
+      setAmount((next.bonusCents / 100).toFixed(2));
+      setMessage({ error: false, text: next.bonusCents === 0 ? '已关闭注册赠送。已有账户余额不变。' : `已保存：之后新注册的客户赠送 ${formatMoney(next.bonusCents)}，每个账户仅一次。已有账户余额不变。` });
+    } catch (error) {
+      setMessage({ error: true, text: `${error instanceof Error ? error.message : '保存失败'}。可重新加载核对当前设置。` });
+    } finally { inFlight.current = false; setBusy(false); }
+  };
+
+  return <section className="rental-card rental-registration-settings" aria-labelledby="registration-bonus-title">
+    <div className="rental-card-head"><div><div className="rental-kicker">ADMIN / REGISTRATION</div><h2 id="registration-bonus-title">注册赠送额度</h2></div><span className="rental-step-chip">{loading ? '读取中…' : settings ? settings.bonusCents > 0 ? `已开启 · ${formatMoney(settings.bonusCents)} / 新账户` : '已关闭' : '暂不可用'}</span></div>
+    <div className="rental-admin-body">
+      <p className="rental-registration-description">新客户注册成功后自动入账，每个账户仅赠送一次。仅对保存后注册的客户生效，不补发、不扣回已有余额。</p>
+      <form className="rental-registration-form" onSubmit={(event) => { event.preventDefault(); confirmSave(); }}>
+        <label className="rental-field"><span>每个新账户赠送金额（元）</span><input aria-describedby="registration-bonus-help" type="number" inputMode="decimal" min="0" max={settings ? settings.maxBonusCents / 100 : 10000} step="0.01" placeholder="例如 20.00" value={amount} disabled={loading || busy || !settings} onChange={(event) => setAmount(event.target.value)} /></label>
+        <button className="rental-small-button" disabled={loading || busy || !settings}>{busy ? '保存中…' : '保存注册赠金'}</button>
+        <button type="button" className="rental-small-button" disabled={loading || busy} onClick={() => void load()}>重新加载</button>
+      </form>
+      <p id="registration-bonus-help" className="rental-billing-info">设为 0 即关闭；支持 0.01 元精度，上限 ¥10,000。赠金属于活动额度，不计入实收充值；修改会记录操作审计。</p>
+      {message && <div role={message.error ? 'alert' : 'status'} className={`rental-code-message ${message.error ? 'rental-text-error' : 'rental-code-success'}`}>{message.text}</div>}
+    </div>
+    {pending && <ConfirmDialog title={pending.cents === 0 ? '确认关闭注册赠送？' : '确认修改注册赠金？'} detail={`将从 ${formatMoney(pending.expectedCents)} 改为 ${formatMoney(pending.cents)} / 新账户。仅影响之后注册的客户，已有余额不变。`} confirmLabel="确认保存" onCancel={() => setPending(null)} onConfirm={() => void save()} />}
+  </section>;
+}
+
 function RechargeContactBanner({ compact = false }: { compact?: boolean }) {
   return <aside className={`rental-recharge-contact${compact ? ' rental-recharge-contact-compact' : ''}`} aria-label="充值管理员联系方式">
     <div className="rental-recharge-contact-lead"><span className="rental-recharge-contact-icon"><MessageCircle size={19} /></span><div><small>TOP UP SUPPORT</small><strong>充值请联系管理员</strong><span>确认到账后，管理员会发放充值码，兑换即可入账。</span></div></div>
@@ -414,7 +493,21 @@ function AuthGate({ mode, setMode, name, setName, password, setPassword, submitt
   onSubmit: () => void;
   notice: { tone: 'info' | 'success' | 'error'; text: string } | null;
 }) {
-  return <main className="rental-app"><div className="rental-auth-shell"><RentalBrand /><section className="rental-card rental-auth-card"><div className="rental-kicker">SELF-SERVICE ACCESS</div><h1>{mode === 'login' ? '登录 GPU 云实例' : '注册客户账户'}</h1><p>{mode === 'login' ? '登录后管理实例、余额与 SSH 入口。' : '注册后请先充值；余额不足时实例无法开机或会自动关机。'}</p><RechargeContactBanner compact />{notice && <div className={`rental-notice rental-notice-${notice.tone}`}>{notice.text}</div>}<label className="rental-field"><span>账户名</span><input value={name} autoComplete="username" onChange={(event) => setName(event.target.value)} /></label><label className="rental-field"><span>密码</span><input type="password" value={password} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') onSubmit(); }} /></label><button className="rental-primary-button" type="button" disabled={submitting || !name.trim() || !password} onClick={onSubmit}>{submitting ? '处理中…' : mode === 'login' ? '登录' : '创建账户'}</button><button className="rental-auth-switch" type="button" onClick={() => setMode(mode === 'login' ? 'register' : 'login')}>{mode === 'login' ? '还没有账户？立即注册' : '已有账户？返回登录'}</button></section></div></main>;
+  const [bonusCents, setBonusCents] = useState<number | null>(null);
+  useEffect(() => {
+    if (mode !== 'register') return;
+    let disposed = false;
+    void rentalRequest<{ bonusCents: number }>('/api/auth/registration-policy')
+      .then((policy) => { if (!disposed) setBonusCents(policy.bonusCents); })
+      .catch(() => { if (!disposed) setBonusCents(null); });
+    return () => { disposed = true; };
+  }, [mode]);
+  const registrationDescription = bonusCents === null
+    ? '注册后管理实例与余额，赠送额度以注册完成时的规则为准。'
+    : bonusCents > 0
+      ? `新客户注册赠送 ${formatMoney(bonusCents)}，每个账户一次。以注册完成时的规则为准。`
+      : '当前无注册赠金。注册后可兑换充值码，余额充足后开机。';
+  return <main className="rental-app"><div className="rental-auth-shell"><RentalBrand /><section className="rental-card rental-auth-card"><div className="rental-kicker">SELF-SERVICE ACCESS</div><h1>{mode === 'login' ? '登录 GPU 云实例' : '注册客户账户'}</h1><p>{mode === 'login' ? '登录后管理实例、余额与 SSH 入口。' : registrationDescription}</p><RechargeContactBanner compact />{notice && <div className={`rental-notice rental-notice-${notice.tone}`}>{notice.text}</div>}<label className="rental-field"><span>账户名</span><input value={name} autoComplete="username" onChange={(event) => setName(event.target.value)} /></label><label className="rental-field"><span>密码</span><input type="password" value={password} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') onSubmit(); }} /></label><button className="rental-primary-button" type="button" disabled={submitting || !name.trim() || !password} onClick={onSubmit}>{submitting ? '处理中…' : mode === 'login' ? '登录' : '创建账户'}</button><button className="rental-auth-switch" type="button" onClick={() => setMode(mode === 'login' ? 'register' : 'login')}>{mode === 'login' ? '还没有账户？立即注册' : '已有账户？返回登录'}</button></section></div></main>;
 }
 
 function AdminPanel({ currentRateCents, onNotice }: { currentRateCents: number; onNotice: (notice: { tone: 'info' | 'success' | 'error'; text: string } | null) => void }) {
@@ -512,7 +605,7 @@ function AdminPanel({ currentRateCents, onNotice }: { currentRateCents: number; 
         <button type="button" className="rental-small-button rental-admin-recharge" disabled={busy || !selected} onClick={() => void recharge()}>充值</button>
       </div>
       <div className="rental-admin-customer-list">{customers.length === 0 ? <span>暂无客户账户</span> : customers.map((customer) => <div key={customer.name}><span>{customer.name}</span><strong>{formatMoney(customer.balanceCents)}</strong></div>)}</div>
-      <p className="rental-billing-info">GPU 改价仅对下次开机生效，运行实例保持本次锁定费率。无头模式固定 ¥0.08/小时。新注册账户初始余额为 ¥0.00，充值可在下方收支记录中核对。</p>
+      <p className="rental-billing-info">GPU 改价仅对下次开机生效，运行实例保持本次锁定费率。无头模式固定 ¥0.08/小时。新账户按注册时的赠送设置入账，赠金和充值均可在收支记录中核对。</p>
     </div>
     {confirm && <ConfirmDialog title={confirm === 'recharge' ? '确认给客户充值' : '确认修改卡时价格'} detail={confirm === 'recharge' ? `给 ${selected} 增加余额 ¥${Number(amount).toFixed(2)}，请确认账户和金额无误。` : `新开机价格将从 ${formatMoney(currentRateCents)}/h 改为 ¥${Number(price).toFixed(2)}/h。已运行实例价格不变，改价将记录审计。`} onCancel={() => setConfirm(null)} onConfirm={() => void (confirm === 'recharge' ? recharge(true) : savePrice(true))} />}
   </section>;
@@ -771,7 +864,7 @@ function AdminFleet({ storage }: { storage?: RentalState['storage'] }) {
     catch (e) { setError(e instanceof Error ? e.message : '操作失败'); }
     finally { setActionId(null); }
   };
-  const labels: Record<string, string> = { price_changed: '修改卡时价', instance_start: '启动实例', instance_stop: '关闭实例', instance_delete: '释放实例', guest_poweroff_detected: '检测到关机', recharge_codes_issued: '生成充值码', recharge_codes_revoked: '作废充值码', recharge_code_redeemed: '兑换入账' };
+  const labels: Record<string, string> = { registration_bonus_changed: '修改注册赠金', registration_bonus_granted: '发放注册赠金', price_changed: '修改卡时价', instance_start: '启动实例', instance_stop: '关闭实例', instance_delete: '释放实例', guest_poweroff_detected: '检测到关机', recharge_codes_issued: '生成充值码', recharge_codes_revoked: '作废充值码', recharge_code_redeemed: '兑换入账' };
   return <>
     {storage && <section className="rental-card rental-storage"><div><span className="rental-kicker">INTEL NVME / SHARED STORAGE</span><h2>存储池</h2><p>{storage.mode} · 实际已用 {storage.usedGiB.toFixed(1)} GiB / {storage.totalGiB.toFixed(1)} GiB</p><progress aria-label="磁盘实际使用率" value={storage.usedGiB} max={storage.totalGiB} /><small>规格预留 {storage.reservedGiB} / {storage.budgetGiB} GiB · 物理剩余 {storage.freeGiB.toFixed(1)} GiB · 安全余量 {storage.safetyGiB} GiB</small>{storage.lowSpace && <p className="rental-text-error">物理空间不足，新建及开机已受限，请检查磁盘。</p>}</div></section>}
     <section className="rental-card rental-instances-card"><div className="rental-card-head"><div><div className="rental-kicker">PLATFORM INSTANCES</div><h2>全部客户实例</h2></div><span>{instances.length} 台保留</span></div><div className="rental-list-tools"><label><Search size={15} /><input aria-label="搜索客户实例" placeholder="搜索账户、实例名或 ID" value={query} onChange={(event) => setQuery(event.target.value)} /></label></div>{error && <p className="rental-inline-error">{error}</p>}{instances.filter((row) => `${row.owner} ${row.name} ${row.id}`.toLowerCase().includes(query.toLowerCase())).map((row) => <InstanceRow key={row.id} instance={row} actionId={actionId} onAction={action} />)}</section>

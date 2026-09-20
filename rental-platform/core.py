@@ -31,6 +31,7 @@ FIXED_MEMORY_GB = 62.5
 HEADLESS_VCPU = 2
 HEADLESS_MEMORY_MB = 4_000
 HEADLESS_RATE_CENTS = 8
+MAX_REGISTRATION_BONUS_CENTS = 1_000_000
 COMPUTE_UNITS_PER_CENT = 3_600_000_000
 SYSTEM_DISK_GIB = 50
 FREE_DATA_DISK_GIB = 0
@@ -353,6 +354,17 @@ class Core(RechargeCodeMixin):
                 )
             except sqlite3.IntegrityError as exc:
                 raise ValueError("user already exists") from exc
+            # Registration, gift credit and ledger entry commit together. Read
+            # the policy under the same write lock as account creation so a
+            # concurrent policy change cannot produce a partial/duplicate gift.
+            bonus = self._registration_bonus(con) if role == "customer" else 0
+            if bonus:
+                con.execute("UPDATE users SET balance_cents=balance_cents+? WHERE name=?", (bonus, name))
+                con.execute(
+                    "INSERT INTO billing_entries(owner,cents,reason,created_at,actor,idempotency) VALUES (?,?,?,?,?,?)",
+                    (name, bonus, "registration_bonus", now, "system:registration", f"registration_bonus:{name}"),
+                )
+                self._audit(con, "system:registration", "registration_bonus_granted", name, {"cents": bonus})
             if invite is not None:
                 con.execute(
                     "UPDATE invites SET used_at = ?, used_by = ? WHERE code_hash = ?",
@@ -463,6 +475,47 @@ class Core(RechargeCodeMixin):
         with self._connection() as con:
             row = con.execute("SELECT value FROM settings WHERE key='rate_cents_per_hour'").fetchone()
             return int(row[0]) if row else self.rate_cents_per_hour
+
+    @staticmethod
+    def _registration_bonus(con) -> int:
+        row = con.execute("SELECT value FROM settings WHERE key='registration_bonus_cents'").fetchone()
+        cents = int(row[0]) if row else 0  # Preserve the existing no-gift default.
+        if not 0 <= cents <= MAX_REGISTRATION_BONUS_CENTS:
+            raise ValueError("invalid registration bonus setting")
+        return cents
+
+    def registration_bonus(self) -> int:
+        with self._connection() as con:
+            return self._registration_bonus(con)
+
+    def registration_settings(self, admin: str) -> dict[str, int]:
+        if not self.is_admin(admin):
+            raise PermissionError("admin required")
+        return {"bonusCents": self.registration_bonus(), "maxBonusCents": MAX_REGISTRATION_BONUS_CENTS}
+
+    def set_registration_bonus(self, admin: str, cents: int, expected_cents: int) -> dict[str, int]:
+        if not self.is_admin(admin):
+            raise PermissionError("admin required")
+        if type(cents) is not int or not 0 <= cents <= MAX_REGISTRATION_BONUS_CENTS:
+            raise ValueError("注册赠金须为 0–10000 元，精确到分；0 表示关闭")
+        if type(expected_cents) is not int or not 0 <= expected_cents <= MAX_REGISTRATION_BONUS_CENTS:
+            raise ValueError("请先读取当前赠金设置后再保存")
+        with self._transaction() as con:
+            previous = self._registration_bonus(con)
+            if previous != expected_cents:
+                # A retry of a successfully applied request is harmless.
+                if previous == cents:
+                    return {"bonusCents": previous, "maxBonusCents": MAX_REGISTRATION_BONUS_CENTS}
+                raise RuntimeError("赠金设置已被其他管理员修改，请重新加载后再保存")
+            if previous != cents:
+                con.execute(
+                    "INSERT INTO settings(key,value) VALUES ('registration_bonus_cents',?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(cents),),
+                )
+                self._audit(con, admin, "registration_bonus_changed", "new_customer", {
+                    "oldCents": previous, "newCents": cents, "effective": "future_registrations",
+                })
+        return {"bonusCents": cents, "maxBonusCents": MAX_REGISTRATION_BONUS_CENTS}
 
     def set_price(self, admin: str, cents: int) -> None:
         if not self.is_admin(admin):

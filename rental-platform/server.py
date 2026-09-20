@@ -670,6 +670,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if path in ('/health','/healthz'):
             self.json({'ok':True,'service':'1cat-rental'}); return
+        if path == '/api/auth/registration-policy':
+            self.json({'bonusCents': SERVICE.core.registration_bonus()}); return
+        if path == '/api/admin/registration-bonus':
+            try:
+                owner, _ = self.identity()
+                self.json(SERVICE.core.registration_settings(owner))
+            except PermissionError as exc:
+                self.json({'error':'unauthorized','message':str(exc)},401)
+            return
         if path == '/api/auth/me':
             try:
                 owner, cookie = self.identity()
@@ -755,6 +764,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path == '/api/admin/price':
                 SERVICE.core.set_price(owner, body.get('cents'))
                 self.json({'ok':True},200,set_cookie=cookie); return
+            if path == '/api/admin/registration-bonus':
+                self.json(SERVICE.core.set_registration_bonus(owner, body.get('cents'), body.get('expectedCents'))); return
             if path=='/api/rental/order':
                 result=SERVICE.order(owner,body,self.headers.get('X-Idempotency-Key') or secrets.token_urlsafe(18)); self.json({'instance':result},202,set_cookie=cookie); return
             parts=[urllib.parse.unquote(x) for x in path.split('/') if x]
