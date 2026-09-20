@@ -136,6 +136,29 @@ if [[ "$QA_MODE" == rollback ]]; then
   rollback_release "$requested"
 elif [[ "$QA_MODE" == invalid-backup ]]; then
   rollback_release "$BASE/outside"
+elif [[ "$QA_MODE" == account-rollback || "$QA_MODE" == account-rollback-empty ]]; then
+  install_release
+  requested=$RECOVERY_BACKUP
+  printf 'def delete_customer(\n' >"$ROOT/core.py"
+  python3 - "$DATA/state/core.sqlite3" "$QA_MODE" <<'PY'
+from pathlib import Path
+import sqlite3,sys
+path=Path(sys.argv[1])  # Exact disposable fixture, not production.
+path.unlink()
+with sqlite3.connect(path) as db:
+    db.execute('CREATE TABLE users(name TEXT, deleted_at TEXT)')
+    db.execute('INSERT INTO users VALUES (?,?)', ('alice', '2026-09-20' if sys.argv[2]=='account-rollback' else None))
+PY
+  if [[ "$QA_MODE" == account-rollback ]]; then
+    if rollback_release "$requested"; then exit 90; fi
+    # The recovery path rechecks the same guard after a service stop, too.
+    if restore_backup "$requested"; then exit 91; fi
+    [[ -f "$ROOT/new-version" && -f "$BASE/active" ]]
+  else
+    PROGRAM_CHANGED=0
+    rollback_release "$requested"
+    [[ -f "$ROOT/old-version" && -f "$BASE/active" ]]
+  fi
 elif [[ "$QA_MODE" == migrated-rollback ]]; then
   install_release
   requested=$RECOVERY_BACKUP
@@ -265,6 +288,17 @@ class DeploymentTests(unittest.TestCase):
         self.assertNotEqual(self.invoke("invalid-backup").returncode, 0)
         self.assertTrue((self.base / "active").exists())
         self.assertFalse((self.base / "commands.log").exists())
+
+    def test_deleted_accounts_block_legacy_rollback_and_recovery(self):
+        self.assertEqual(self.invoke("account-rollback").returncode, 0, self.last_output)
+        self.assertEqual(self.last_output.count('this backup would re-enable them'), 2)
+        self.assertTrue((self.base / "program/new-version").exists())
+        commands = (self.base / "commands.log").read_text()
+        self.assertEqual(commands.count('stop 1cat-rental.service'), 1)  # Initial install only.
+
+    def test_legacy_rollback_allowed_without_deleted_accounts(self):
+        self.assertEqual(self.invoke("account-rollback-empty").returncode, 0, self.last_output)
+        self.assert_old_healthy()
 
     def test_migrated_storage_rejects_legacy_controller_rollback(self):
         self.assertEqual(self.invoke('migrated-rollback').returncode, 0, self.last_output)

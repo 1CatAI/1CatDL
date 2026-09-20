@@ -77,8 +77,8 @@ class RechargeCodeMixin:
                     raise ValueError('请求编号已用于其他生成参数，请重新确认')
                 rows = con.execute('SELECT * FROM recharge_codes WHERE batch_id=? ORDER BY id', (previous['id'],)).fetchall()
                 return {'batchId': previous['id'], 'replayed': True, 'codes': [self._code_public(r) for r in rows]}
-            if bound_owner and not con.execute("SELECT 1 FROM users WHERE name=? AND role='customer'", (bound_owner,)).fetchone():
-                raise ValueError('绑定客户账户不存在')
+            if bound_owner and not con.execute("SELECT 1 FROM users WHERE name=? AND role='customer' AND deleted_at IS NULL", (bound_owner,)).fetchone():
+                raise ValueError('绑定客户账户不存在或已删除')
             now = datetime.now(timezone.utc).isoformat()
             batch_id = secrets.token_hex(12)
             con.execute('INSERT INTO recharge_batches VALUES (?,?,?,?,?)', (batch_id,admin,idempotency,intent,now))
@@ -136,7 +136,7 @@ class RechargeCodeMixin:
     def redeem_recharge_code(self, owner, code):
         error, result = None, None
         with self._transaction() as con:
-            user = con.execute("SELECT balance_cents FROM users WHERE name=? AND role='customer'",(owner,)).fetchone()
+            user = con.execute("SELECT balance_cents FROM users WHERE name=? AND role='customer' AND deleted_at IS NULL",(owner,)).fetchone()
             if user is None: raise PermissionError('仅客户账户可以兑换充值码')
             now = datetime.now(timezone.utc)
             limit = con.execute('SELECT * FROM recharge_attempts WHERE owner=?',(owner,)).fetchone()

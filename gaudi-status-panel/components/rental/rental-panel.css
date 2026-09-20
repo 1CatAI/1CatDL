@@ -117,6 +117,18 @@
 .rental-admin-card { margin-top: 20px; }
 .rental-admin-body { padding: 20px 23px; }
 .rental-registration-settings { margin-bottom: 20px; }
+.rental-account-card { margin-bottom: 20px; }
+.rental-account-help { margin: 0; padding: 16px 22px; color: #687993; font-size: 12px; line-height: 1.9; }
+.rental-account-count { align-self: center; color: #8392ac; font-size: 12px; white-space: nowrap; }
+.rental-account-message { padding: 12px 22px; font-size: 13px; line-height: 1.7; border-bottom: 1px solid #edf0f5; }
+.rental-account-status { display: inline-block; padding: 3px 9px; border-radius: 20px; background: #eaf8f1; color: #26805c; white-space: nowrap; }
+.rental-account-status.is-deleted { background: #f1f3f7; color: #748096; }
+.rental-account-meta { display: block; margin-top: 6px; color: #8995a8; font-size: 11px; }
+.rental-confirm-input { margin-bottom: 20px; }
+@media (max-width: 600px) {
+  .rental-account-card .rental-card-head, .rental-account-card .rental-list-tools { flex-wrap: wrap; gap: 10px; }
+  .rental-account-card .rental-list-tools > label { flex-basis: 100%; max-width: none; }
+}
 .rental-registration-description { margin: 0 0 20px; color: #63718b; font-size: 13px; line-height: 1.8; }
 .rental-registration-form { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; }
 .rental-registration-form .rental-field { flex: 1 1 220px; max-width: 340px; }

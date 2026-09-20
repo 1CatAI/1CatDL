@@ -105,7 +105,7 @@ type RentalState = {
   storage?: { totalGiB: number; usedGiB: number; freeGiB: number; safetyGiB: number; reservedGiB: number; budgetGiB: number; lowSpace: boolean; mode: string };
 };
 
-type AdminCustomer = { name: string; balanceCents: number; createdAt: string };
+type AdminCustomer = { name: string; balanceCents: number; createdAt: string; deletedAt: string | null; deletedBy: string | null; instanceCount: number };
 
 const initialState: RentalState = {
   service: 'degraded',
@@ -187,6 +187,7 @@ export function RentalPanel() {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('all');
   const [walletRevision, setWalletRevision] = useState(0);
+  const [customerRevision, setCustomerRevision] = useState(0);
   const [confirmation, setConfirmation] = useState<{ id: string; operation: 'stop' | 'delete'; name: string } | null>(null);
 
   useEffect(() => {
@@ -351,8 +352,9 @@ export function RentalPanel() {
         </section>}
         {tab === 'wallet' && <>{account.role === 'customer' && <RedeemCodePanel onRedeemed={() => { setWalletRevision((value) => value + 1); void refresh(); }} />}<LedgerPanel key={walletRevision} /></>}
         {tab === 'admin' && account.role === 'admin' && <AdminRegistrationBonus />}
-        {account.role === 'admin' && <div hidden={tab !== 'admin'}><AdminCodePanel active={tab === 'admin'} /></div>}
-        {tab === 'admin' && account.role === 'admin' && <><AdminPanel currentRateCents={state.billing.rateCentsPerHour ?? 0} onNotice={setNotice} /><AdminFleet storage={state.storage} /><LedgerPanel admin /></>}
+        {tab === 'admin' && account.role === 'admin' && <AdminAccountPanel onChanged={() => setCustomerRevision((value) => value + 1)} />}
+        {account.role === 'admin' && <div hidden={tab !== 'admin'}><AdminCodePanel active={tab === 'admin'} customerRevision={customerRevision} /></div>}
+        {tab === 'admin' && account.role === 'admin' && <><AdminPanel currentRateCents={state.billing.rateCentsPerHour ?? 0} customerRevision={customerRevision} onNotice={setNotice} /><AdminFleet storage={state.storage} /><LedgerPanel admin /></>}
 
         {tab === 'create' && <div className="rental-grid">
           <section className="rental-card rental-order-card">
@@ -510,7 +512,66 @@ function AuthGate({ mode, setMode, name, setName, password, setPassword, submitt
   return <main className="rental-app"><div className="rental-auth-shell"><RentalBrand /><section className="rental-card rental-auth-card"><div className="rental-kicker">SELF-SERVICE ACCESS</div><h1>{mode === 'login' ? '登录 GPU 云实例' : '注册客户账户'}</h1><p>{mode === 'login' ? '登录后管理实例、余额与 SSH 入口。' : registrationDescription}</p><RechargeContactBanner compact />{notice && <div className={`rental-notice rental-notice-${notice.tone}`}>{notice.text}</div>}<label className="rental-field"><span>账户名</span><input value={name} autoComplete="username" onChange={(event) => setName(event.target.value)} /></label><label className="rental-field"><span>密码</span><input type="password" value={password} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} onChange={(event) => setPassword(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') onSubmit(); }} /></label><button className="rental-primary-button" type="button" disabled={submitting || !name.trim() || !password} onClick={onSubmit}>{submitting ? '处理中…' : mode === 'login' ? '登录' : '创建账户'}</button><button className="rental-auth-switch" type="button" onClick={() => setMode(mode === 'login' ? 'register' : 'login')}>{mode === 'login' ? '还没有账户？立即注册' : '已有账户？返回登录'}</button></section></div></main>;
 }
 
-function AdminPanel({ currentRateCents, onNotice }: { currentRateCents: number; onNotice: (notice: { tone: 'info' | 'success' | 'error'; text: string } | null) => void }) {
+function AdminAccountPanel({ onChanged }: { onChanged: () => void }) {
+  const [customers, setCustomers] = useState<AdminCustomer[]>([]);
+  const [status, setStatus] = useState('active');
+  const [query, setQuery] = useState('');
+  const [revision, setRevision] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const inFlight = useRef(false);
+  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const [confirmation, setConfirmation] = useState<{ customer: AdminCustomer; action: 'delete' | 'restore' } | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    const abort = new AbortController();
+    const timer = window.setTimeout(() => {
+      setLoading(true);
+      void rentalRequest<{ customers: AdminCustomer[] }>(`/api/admin/customers?status=${status}`, { signal: abort.signal })
+        .then((data) => { if (!disposed) setCustomers(data.customers); })
+        .catch((error) => { if (!disposed) { setCustomers([]); setMessage({ ok: false, text: error instanceof Error ? error.message : '读取账户失败' }); } })
+        .finally(() => { if (!disposed) setLoading(false); });
+    }, 0);
+    return () => { disposed = true; clearTimeout(timer); abort.abort(); };
+  }, [status, revision]);
+
+  const perform = async () => {
+    if (!confirmation || inFlight.current) return;
+    const { customer, action } = confirmation;
+    inFlight.current = true;
+    setBusy(true); setConfirmation(null); setMessage(null);
+    try {
+      await rentalRequest(`/api/admin/customers/${encodeURIComponent(customer.name)}/${action}`, {
+        method: 'POST', body: JSON.stringify(action === 'delete' ? { confirmName: customer.name } : {}),
+      });
+      setMessage({ ok: true, text: action === 'delete' ? `已删除账户 ${customer.name}，登录会话已失效；可在“已删除”中恢复。` : `已恢复账户 ${customer.name}，客户需重新登录，余额未变。` });
+      onChanged();
+    } catch (error) {
+      setMessage({ ok: false, text: error instanceof Error ? error.message : '账户操作失败' });
+    } finally {
+      setRevision((value) => value + 1);
+      inFlight.current = false; setBusy(false);
+    }
+  };
+  const visible = customers.filter((customer) => customer.name.toLowerCase().includes(query.trim().toLowerCase()));
+  return <section className="rental-card rental-account-card" aria-labelledby="account-management-title">
+    <div className="rental-card-head"><div><div className="rental-kicker">ADMIN / ACCOUNTS</div><h2 id="account-management-title">客户账户管理</h2></div><button className="rental-small-button" disabled={loading || busy} onClick={() => { setMessage(null); setRevision((value) => value + 1); }}><RefreshCw size={14} />刷新账户</button></div>
+    <p className="rental-account-help">删除后立即禁止登录，保留余额、历史账单和账户名，可随时恢复。账户下的全部实例（含已关机实例）须先在下方实例管理中释放；这里不会删除磁盘或自动退款。</p>
+    <div className="rental-list-tools"><label><Search size={14} /><input aria-label="搜索客户账户" placeholder="搜索账户名" value={query} onChange={(event) => setQuery(event.target.value)} /></label><select aria-label="账户状态" value={status} disabled={busy} onChange={(event) => { setStatus(event.target.value); setLoading(true); setMessage(null); }}><option value="active">正常账户</option><option value="deleted">已删除</option><option value="all">全部账户</option></select><span className="rental-account-count">{loading ? '加载中…' : `${visible.length} 个账户`}</span></div>
+    {message && <div role={message.ok ? 'status' : 'alert'} className={`rental-account-message ${message.ok ? 'rental-code-success' : 'rental-text-error'}`}>{message.text}</div>}
+    <div className="rental-table-wrap"><table className="rental-table"><thead><tr><th>账户</th><th>余额</th><th>保留实例</th><th>状态</th><th>注册 / 删除时间</th><th>操作</th></tr></thead><tbody>
+      {loading ? <tr><td colSpan={6}>正在读取账户…</td></tr> : visible.length === 0 ? <tr><td colSpan={6}>{query ? '没有匹配的账户' : status === 'deleted' ? '暂无已删除账户' : '暂无客户账户'}</td></tr> : visible.map((customer) => <tr key={customer.name}>
+        <td><strong>{customer.name}</strong></td><td>{formatMoney(customer.balanceCents)}</td><td>{customer.instanceCount}</td><td><span className={`rental-account-status ${customer.deletedAt ? 'is-deleted' : ''}`}>{customer.deletedAt ? '已删除' : '正常'}</span></td><td>{formatDate(customer.createdAt)}{customer.deletedAt && <small className="rental-account-meta">删除于 {formatDate(customer.deletedAt)} · {customer.deletedBy}</small>}</td>
+        <td>{customer.deletedAt ? <button className="rental-small-button" disabled={busy} aria-label={`恢复账户 ${customer.name}`} onClick={() => setConfirmation({ customer, action: 'restore' })}>恢复账户</button> : <><button className="rental-small-button rental-small-danger" disabled={busy || customer.instanceCount > 0} aria-label={`删除账户 ${customer.name}`} onClick={() => setConfirmation({ customer, action: 'delete' })}>删除账户</button>{customer.instanceCount > 0 && <small className="rental-account-meta">请先释放全部实例</small>}</>}</td>
+      </tr>)}
+    </tbody></table></div>
+    {customers.length >= 500 && <p className="rental-account-help">当前显示最近注册的 500 个符合条件的账户。</p>}
+    {confirmation && <ConfirmDialog title={confirmation.action === 'delete' ? `删除账户 ${confirmation.customer.name}？` : `恢复账户 ${confirmation.customer.name}？`} detail={confirmation.action === 'delete' ? `该客户会立即退出登录，之后不能登录、下单、充值或兑换充值码。余额 ${formatMoney(confirmation.customer.balanceCents)} 和历史账目保留，不自动退款；账户名不能重新注册。可从“已删除”中恢复。` : `恢复后客户可用原密码重新登录，保留原余额，不重新发放注册赠金，也不会恢复已释放的实例。`} danger={confirmation.action === 'delete'} confirmLabel={confirmation.action === 'delete' ? '确认删除账户' : '确认恢复账户'} requiredText={confirmation.action === 'delete' ? confirmation.customer.name : undefined} onCancel={() => setConfirmation(null)} onConfirm={() => void perform()} />}
+  </section>;
+}
+
+function AdminPanel({ currentRateCents, customerRevision, onNotice }: { currentRateCents: number; customerRevision: number; onNotice: (notice: { tone: 'info' | 'success' | 'error'; text: string } | null) => void }) {
   const [customers, setCustomers] = useState<AdminCustomer[]>([]);
   const [selected, setSelected] = useState('');
   const [amount, setAmount] = useState('100');
@@ -530,7 +591,7 @@ function AdminPanel({ currentRateCents, onNotice }: { currentRateCents: number; 
     try {
       const result = await rentalRequest<{ customers: AdminCustomer[] }>('/api/admin/customers');
       setCustomers(result.customers);
-      setSelected((previous) => previous || result.customers[0]?.name || '');
+      setSelected((previous) => result.customers.some((customer) => customer.name === previous) ? previous : result.customers[0]?.name || '');
     } catch (error) {
       onNotice({ tone: 'error', text: error instanceof Error ? error.message : '读取客户列表失败' });
     } finally {
@@ -541,7 +602,7 @@ function AdminPanel({ currentRateCents, onNotice }: { currentRateCents: number; 
   useEffect(() => {
     const initial = window.setTimeout(() => { void load(); }, 0);
     return () => window.clearTimeout(initial);
-  }, [load]);
+  }, [load, customerRevision]);
 
   const recharge = async (confirmed = false) => {
     const yuan = Number(amount);
@@ -640,7 +701,7 @@ function RedeemCodePanel({ onRedeemed }: { onRedeemed: () => void }) {
   </section>;
 }
 
-function AdminCodePanel({ active }: { active: boolean }) {
+function AdminCodePanel({ active, customerRevision }: { active: boolean; customerRevision: number }) {
   const [amount, setAmount] = useState('100');
   const [count, setCount] = useState('1');
   const [kind, setKind] = useState<'cash' | 'gift'>('cash');
@@ -664,7 +725,8 @@ function AdminCodePanel({ active }: { active: boolean }) {
   const quantity = /^\d+$/.test(count) ? Number(count) : 0;
   const total = cents * quantity;
   const hasPlaintext = !!result?.codes.some((row) => row.code);
-  const canIssue = cents >= 1 && cents <= 1_000_000 && quantity >= 1 && quantity <= 100 && total <= 10_000_000 && acknowledged && (kind === 'gift' || !!note.trim()) && !busy && !hasPlaintext;
+  const unavailableBound = !!bound && !customers.some((customer) => customer.name === bound);
+  const canIssue = cents >= 1 && cents <= 1_000_000 && quantity >= 1 && quantity <= 100 && total <= 10_000_000 && acknowledged && (kind === 'gift' || !!note.trim()) && !busy && !hasPlaintext && !unavailableBound;
 
   useEffect(() => {
     if (!hasPlaintext) return;
@@ -687,7 +749,7 @@ function AdminCodePanel({ active }: { active: boolean }) {
     let disposed = false;
     void rentalRequest<{ customers: AdminCustomer[] }>('/api/admin/customers').then((data) => { if (!disposed) setCustomers(data.customers); }).catch((e) => { if (!disposed) setError(e instanceof Error ? e.message : '读取客户失败'); });
     return () => { disposed = true; };
-  }, [active]);
+  }, [active, customerRevision]);
 
   const perform = async () => {
     if (!confirmation || inFlight.current) return;
@@ -725,7 +787,7 @@ function AdminCodePanel({ active }: { active: boolean }) {
         <label className="rental-field"><span>单张金额（元）</span><input aria-label="单张金额" type="number" min="0.01" max="10000" step="0.01" value={amount} onChange={(e) => { setAmount(e.target.value); setAcknowledged(false); }} /></label>
         <label className="rental-field"><span>生成数量</span><input aria-label="生成数量" type="number" min="1" max="100" step="1" value={count} onChange={(e) => { setCount(e.target.value); setAcknowledged(false); }} /></label>
         <label className="rental-field"><span>额度类型</span><select value={kind} onChange={(e) => { setKind(e.target.value as 'cash' | 'gift'); setAcknowledged(false); }}><option value="cash">已收款充值</option><option value="gift">赠送额度（不可退款）</option></select></label>
-        <label className="rental-field"><span>绑定客户（可选）</span><select value={bound} onChange={(e) => { setBound(e.target.value); setAcknowledged(false); }}><option value="">不绑定 · 持码客户可兑换</option>{customers.map((row) => <option key={row.name} value={row.name}>{row.name}</option>)}</select></label>
+        <label className="rental-field"><span>绑定客户（可选）</span><select value={bound} onChange={(e) => { setBound(e.target.value); setAcknowledged(false); }}><option value="">不绑定 · 持码客户可兑换</option>{unavailableBound && <option value={bound} disabled>{bound} · 已删除或不可用，请重新选择</option>}{customers.map((row) => <option key={row.name} value={row.name}>{row.name}</option>)}</select></label>
         <label className="rental-field rental-code-note"><span>{kind === 'cash' ? '收款编号 / 核验备注（必填，仅管理员可见）' : '发放备注（仅管理员可见）'}</span><input maxLength={120} value={note} onChange={(e) => { setNote(e.target.value); setAcknowledged(false); }} placeholder={kind === 'cash' ? '例如：已核实到账的商户流水编号，不填密码或密钥' : '例如：活动赠送'} /></label>
       </fieldset>
       <div className="rental-code-checkout"><div><span>本批额度</span><strong>{formatMoney(Number.isFinite(total) ? total : 0)}</strong><small>最多 100 张 / 批；每批不超过 ¥100,000</small></div><label><input type="checkbox" checked={acknowledged} disabled={busy || hasPlaintext} onChange={(e) => setAcknowledged(e.target.checked)} />{kind === 'cash' ? '我已核实实际到账，且与本批额度一致' : '我确认批准发放这批赠送额度'}</label><button className="rental-primary-button" disabled={!canIssue} onClick={() => setConfirmation({ type: 'issue' })}>{busy ? '处理中…' : '生成充值码'}</button></div>
@@ -802,10 +864,11 @@ function CopyButton({ value, label }: { value: string; label: string }) {
   return <button className="rental-small-button" onClick={() => void copy()} aria-label={label}><Copy size={13} />{copied || label}</button>;
 }
 
-function ConfirmDialog({ title, detail, danger, confirmLabel, onCancel, onConfirm }: { title: string; detail: string; danger?: boolean; confirmLabel?: string; onCancel: () => void; onConfirm: () => void }) {
+function ConfirmDialog({ title, detail, danger, confirmLabel, requiredText, onCancel, onConfirm }: { title: string; detail: string; danger?: boolean; confirmLabel?: string; requiredText?: string; onCancel: () => void; onConfirm: () => void }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const [typed, setTyped] = useState('');
   useEffect(() => { const dialog = ref.current; dialog?.showModal(); return () => dialog?.close(); }, []);
-  return <dialog className="rental-dialog" ref={ref} onCancel={onCancel} aria-labelledby="rental-confirm-title"><h2 id="rental-confirm-title">{title}</h2><p>{detail}</p><div><button className="rental-small-button" autoFocus onClick={onCancel}>取消</button><button className={`rental-small-button ${danger ? 'rental-small-danger' : ''}`} onClick={onConfirm}>{confirmLabel ?? (danger ? '确认永久释放' : '确认操作')}</button></div></dialog>;
+  return <dialog className="rental-dialog" ref={ref} onCancel={onCancel} aria-labelledby="rental-confirm-title"><h2 id="rental-confirm-title">{title}</h2><p>{detail}</p>{requiredText && <label className="rental-field rental-confirm-input"><span>输入账户名 {requiredText} 确认</span><input aria-label="删除确认账户名" autoComplete="off" spellCheck={false} value={typed} onChange={(event) => setTyped(event.target.value)} /></label>}<div><button className="rental-small-button" autoFocus onClick={onCancel}>取消</button><button className={`rental-small-button ${danger ? 'rental-small-danger' : ''}`} disabled={requiredText !== undefined && typed !== requiredText} onClick={onConfirm}>{confirmLabel ?? (danger ? '确认永久释放' : '确认操作')}</button></div></dialog>;
 }
 
 type LedgerEntry = { id: number; owner: string; instance_id: number | null; cents: number; reason: string; created_at: string; actor: string | null };
@@ -864,7 +927,7 @@ function AdminFleet({ storage }: { storage?: RentalState['storage'] }) {
     catch (e) { setError(e instanceof Error ? e.message : '操作失败'); }
     finally { setActionId(null); }
   };
-  const labels: Record<string, string> = { registration_bonus_changed: '修改注册赠金', registration_bonus_granted: '发放注册赠金', price_changed: '修改卡时价', instance_start: '启动实例', instance_stop: '关闭实例', instance_delete: '释放实例', guest_poweroff_detected: '检测到关机', recharge_codes_issued: '生成充值码', recharge_codes_revoked: '作废充值码', recharge_code_redeemed: '兑换入账' };
+  const labels: Record<string, string> = { customer_deleted: '删除客户账户', customer_restored: '恢复客户账户', registration_bonus_changed: '修改注册赠金', registration_bonus_granted: '发放注册赠金', price_changed: '修改卡时价', instance_start: '启动实例', instance_stop: '关闭实例', instance_delete: '释放实例', guest_poweroff_detected: '检测到关机', recharge_codes_issued: '生成充值码', recharge_codes_revoked: '作废充值码', recharge_code_redeemed: '兑换入账' };
   return <>
     {storage && <section className="rental-card rental-storage"><div><span className="rental-kicker">INTEL NVME / SHARED STORAGE</span><h2>存储池</h2><p>{storage.mode} · 实际已用 {storage.usedGiB.toFixed(1)} GiB / {storage.totalGiB.toFixed(1)} GiB</p><progress aria-label="磁盘实际使用率" value={storage.usedGiB} max={storage.totalGiB} /><small>规格预留 {storage.reservedGiB} / {storage.budgetGiB} GiB · 物理剩余 {storage.freeGiB.toFixed(1)} GiB · 安全余量 {storage.safetyGiB} GiB</small>{storage.lowSpace && <p className="rental-text-error">物理空间不足，新建及开机已受限，请检查磁盘。</p>}</div></section>}
     <section className="rental-card rental-instances-card"><div className="rental-card-head"><div><div className="rental-kicker">PLATFORM INSTANCES</div><h2>全部客户实例</h2></div><span>{instances.length} 台保留</span></div><div className="rental-list-tools"><label><Search size={15} /><input aria-label="搜索客户实例" placeholder="搜索账户、实例名或 ID" value={query} onChange={(event) => setQuery(event.target.value)} /></label></div>{error && <p className="rental-inline-error">{error}</p>}{instances.filter((row) => `${row.owner} ${row.name} ${row.id}`.toLowerCase().includes(query.toLowerCase())).map((row) => <InstanceRow key={row.id} instance={row} actionId={actionId} onAction={action} />)}</section>

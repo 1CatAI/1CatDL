@@ -59,6 +59,16 @@ npm run build
 
 注册页通过只读 `/api/auth/registration-policy` 显示当前赠送政策；管理员专用 `/api/admin/registration-bonus` 支持 GET 和 POST，POST 使用整数分 `cents` 和读取时的 `expectedCents`，拒绝非管理员、非法金额与过期覆盖请求。测试见 `rental-platform/test_registration_bonus.py`。
 
+## 客户账户删除与恢复
+
+管理员在管理中心的“客户账户管理”搜索账户，点击“删除账户”，输入完整账户名确认。仅客户账户可删除，管理员（含自己）不能删除；所有实例须先释放并等待删除完成，包括关机保留的实例。此操作不会自动关机、删除磁盘、退款或清零余额。
+
+账户采用可恢复删除：立即撤销所有登录会话，禁止登录、下单、充值及兑换；历史账单、余额、已释放实例记录和账户名保留，不能同名重注册领赠金。在“已删除”列表可恢复，客户需重新登录；不重复赠送额度，也不恢复已释放的磁盘。绑定该账户的未兑换码保留，恢复后仍可使用；不自动解除绑定。
+
+接口仅管理员可用：`GET /api/admin/customers?status=active|deleted|all`（默认正常账户，每类最近 500 个）；`POST /api/admin/customers/{name}/delete`，JSON `{ "confirmName": "完整账户名" }`；`POST /api/admin/customers/{name}/restore`。删除、恢复均记审计；事务保护删除与下单、登录、充值并发。数据库为增量字段迁移，不重建或清空用户表。
+
+存在已删除账户时，部署脚本禁止回退到不支持账户删除的旧后端，避免重新开放登录；仍可单独回滚 UI。禁止绕过脚本直接换回旧控制器。测试见 `rental-platform/test_account_deletion.py` 和部署故障注入测试。
+
 现有充值码代表平台余额入账机制，不是支付通道或自动退款系统。生产客户余额不能用于测试。发布前必须完成宿主机和隔离真实VM验收。
 
 本仓库未授予额外开源许可证；第三方依赖遵循各自许可证。

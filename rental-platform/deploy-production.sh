@@ -172,9 +172,29 @@ displace_program() {
   return 0
 }
 
+guard_account_rollback() {
+  local backup=$1
+  if grep -q 'def delete_customer(' "$backup/program/core.py" 2>/dev/null; then return 0; fi
+  if grep -q 'def delete_customer(' "$ROOT/core.py" "$SCRIPT_DIR/core.py" 2>/dev/null &&
+     [[ -f "$DATA/state/core.sqlite3" ]]; then
+    if ! python3 - "$DATA/state/core.sqlite3" <<'PY'
+import sqlite3,sys
+db=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True)
+columns={r[1] for r in db.execute('PRAGMA table_info(users)')}
+sys.exit(1 if 'deleted_at' in columns and db.execute('SELECT 1 FROM users WHERE deleted_at IS NOT NULL LIMIT 1').fetchone() else 0)
+PY
+    then
+      echo 'deleted customer accounts exist; this backup would re-enable them. Use ui-rollback or an account-deletion-compatible release.' >&2
+      return 1
+    fi
+  fi
+}
+
 restore_backup() {
   local backup=$1 restored
   validate_backup "$backup" || return
+  # Recheck after the service stops: a deletion could race the initial preflight.
+  guard_account_rollback "$backup" || return
   if [[ -d "$backup/program" ]]; then
     restored=$(mktemp -d "$(dirname "$ROOT")/.1cat-rental-restore.XXXXXX") || return
     cp -a "$backup/program/." "$restored/" || return
@@ -258,6 +278,7 @@ install_release() {
 rollback_release() {
   local requested=$1
   validate_backup "$requested"
+  guard_account_rollback "$requested" || return
   if [[ -f "$ROOT/core.py" ]] && grep -q 'HEADLESS_VCPU' "$ROOT/core.py" &&
      ! grep -q 'HEADLESS_VCPU' "$requested/program/core.py"; then
     if ! python3 - "$DATA/state/core.sqlite3" <<'PY'

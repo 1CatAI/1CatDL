@@ -201,6 +201,8 @@ class Core(RechargeCodeMixin):
             self._ensure_column(con, "users", "role", "TEXT NOT NULL DEFAULT 'customer'")
             self._ensure_column(con, "users", "balance_cents", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(con, "users", "last_activity_at", "TEXT")
+            self._ensure_column(con, "users", "deleted_at", "TEXT")
+            self._ensure_column(con, "users", "deleted_by", "TEXT")
             self._ensure_column(con, "instances", "last_activity_at", "TEXT")
             self._ensure_column(con, "instances", "storage_started_at", "TEXT")
             self._ensure_column(con, "instances", "storage_metered_microcents", "INTEGER NOT NULL DEFAULT 0")
@@ -378,7 +380,7 @@ class Core(RechargeCodeMixin):
             raise PermissionError("invalid credentials")
         with self._connection() as con:
             row = con.execute(
-                "SELECT salt, password_hash FROM users WHERE name = ?", (name,)
+                "SELECT salt, password_hash FROM users WHERE name = ? AND deleted_at IS NULL", (name,)
             ).fetchone()
         if row is None or not hmac.compare_digest(
             self._password(password, row["salt"]), row["password_hash"]
@@ -387,6 +389,9 @@ class Core(RechargeCodeMixin):
         token = secrets.token_urlsafe(32)
         now = datetime.now(timezone.utc)
         with self._transaction() as con:
+            # Password hashing happens outside the write lock. A concurrent
+            # deletion must not be followed by a newly valid login session.
+            self._require_active_user(con, name)
             con.execute(
                 "DELETE FROM sessions WHERE expires_at <= ?", (now.isoformat(),)
             )
@@ -407,7 +412,8 @@ class Core(RechargeCodeMixin):
             raise PermissionError("invalid or expired session")
         with self._connection() as con:
             row = con.execute(
-                "SELECT owner, expires_at FROM sessions WHERE token_hash = ?",
+                "SELECT s.owner, s.expires_at FROM sessions s JOIN users u ON u.name=s.owner "
+                "WHERE s.token_hash = ? AND u.deleted_at IS NULL",
                 (self._hash_secret(token),),
             ).fetchone()
             if row is None or datetime.fromisoformat(row["expires_at"]) <= datetime.now(timezone.utc):
@@ -422,7 +428,7 @@ class Core(RechargeCodeMixin):
         owner = self._owner(owner)
         with self._connection() as con:
             row = con.execute(
-                "SELECT name, role, balance_cents, created_at, last_activity_at FROM users WHERE name=?",
+                "SELECT name, role, balance_cents, created_at, last_activity_at FROM users WHERE name=? AND deleted_at IS NULL",
                 (owner,),
             ).fetchone()
         if row is None:
@@ -438,6 +444,11 @@ class Core(RechargeCodeMixin):
     def is_admin(self, owner: str) -> bool:
         return self.profile(owner)["role"] == "admin"
 
+    @staticmethod
+    def _require_active_user(con: sqlite3.Connection, owner: str) -> None:
+        if con.execute("SELECT 1 FROM users WHERE name=? AND deleted_at IS NULL", (owner,)).fetchone() is None:
+            raise PermissionError("账户不可用，请联系管理员")
+
     def recharge(self, admin: str, customer: str, cents: int, note: str = "", idempotency: str | None = None) -> dict[str, Any]:
         if not self.is_admin(admin):
             raise PermissionError("admin required")
@@ -448,7 +459,7 @@ class Core(RechargeCodeMixin):
             raise ValueError("invalid idempotency key")
         with self._transaction() as con:
             row = con.execute(
-                "SELECT balance_cents FROM users WHERE name=? AND role='customer'", (customer,)
+                "SELECT balance_cents FROM users WHERE name=? AND role='customer' AND deleted_at IS NULL", (customer,)
             ).fetchone()
             if row is None:
                 raise KeyError("customer not found")
@@ -465,11 +476,66 @@ class Core(RechargeCodeMixin):
             )
         return {"user": customer, "balanceCents": balance}
 
-    def customers(self, admin: str) -> list[dict[str, Any]]:
+    def customers(self, admin: str, status: str = "active") -> list[dict[str, Any]]:
         if not self.is_admin(admin):
             raise PermissionError("admin required")
+        filters = {"active": "u.deleted_at IS NULL", "deleted": "u.deleted_at IS NOT NULL", "all": "1=1"}
+        if not isinstance(status, str) or status not in filters:
+            raise ValueError("invalid account status")
         with self._connection() as con:
-            return [dict(row) for row in con.execute("SELECT name, balance_cents AS balanceCents, created_at AS createdAt FROM users WHERE role='customer' ORDER BY created_at DESC LIMIT 500")]
+            return [dict(row) for row in con.execute(
+                "SELECT u.name, u.balance_cents AS balanceCents, u.created_at AS createdAt, "
+                "u.deleted_at AS deletedAt, u.deleted_by AS deletedBy, "
+                "(SELECT COUNT(*) FROM instances i WHERE i.owner=u.name AND "
+                "(i.state!='deleted' OR i.slot IS NOT NULL OR i.endpoint IS NOT NULL OR i.desired_action IS NOT NULL)) AS instanceCount "
+                "FROM users u WHERE u.role='customer' AND " + filters[status] + " ORDER BY u.created_at DESC LIMIT 500"
+            )]
+
+    def delete_customer(self, admin: str, customer: str, confirmation: str) -> dict[str, Any]:
+        """Revoke access, not financial history. Never delete VM disks implicitly."""
+        if not self.is_admin(admin):
+            raise PermissionError("admin required")
+        customer = self._owner(customer)
+        if confirmation != customer:
+            raise ValueError("请输入完整账户名确认删除")
+        with self._transaction() as con:
+            row = con.execute("SELECT * FROM users WHERE name=?", (customer,)).fetchone()
+            if row is None:
+                raise KeyError("customer not found")
+            if row["role"] != "customer":
+                raise ValueError("不允许删除管理员账户")
+            # The same lock covers new orders and deletion, including stopped
+            # instances with retained disks and pending worker operations.
+            remaining = con.execute(
+                "SELECT COUNT(*) FROM instances WHERE owner=? AND "
+                "(state!='deleted' OR slot IS NOT NULL OR endpoint IS NOT NULL OR desired_action IS NOT NULL)",
+                (customer,),
+            ).fetchone()[0]
+            if remaining:
+                raise RuntimeError(f"该账户仍有 {remaining} 个实例，请先在实例管理中释放，等待删除完成后再删除账户")
+            if con.execute("SELECT 1 FROM usage_ledger WHERE owner=? AND closed_at IS NULL LIMIT 1", (customer,)).fetchone():
+                raise RuntimeError("该账户仍有未关闭的计费记录，请先检查实例状态")
+            con.execute("DELETE FROM sessions WHERE owner=?", (customer,))
+            deleted_at = row["deleted_at"] or _now()
+            if not row["deleted_at"]:
+                con.execute("UPDATE users SET deleted_at=?, deleted_by=? WHERE name=?", (deleted_at, admin, customer))
+                self._audit(con, admin, "customer_deleted", customer, {"balanceCents": row["balance_cents"], "recoverable": True})
+        return {"name": customer, "deletedAt": deleted_at, "balanceCents": row["balance_cents"]}
+
+    def restore_customer(self, admin: str, customer: str) -> dict[str, Any]:
+        if not self.is_admin(admin):
+            raise PermissionError("admin required")
+        customer = self._owner(customer)
+        with self._transaction() as con:
+            row = con.execute("SELECT * FROM users WHERE name=? AND role='customer'", (customer,)).fetchone()
+            if row is None:
+                raise KeyError("customer not found")
+            if row["deleted_at"]:
+                # Restoration never revives sessions, instances or signup gifts.
+                con.execute("DELETE FROM sessions WHERE owner=?", (customer,))
+                con.execute("UPDATE users SET deleted_at=NULL, deleted_by=NULL WHERE name=?", (customer,))
+                self._audit(con, admin, "customer_restored", customer, {"balanceCents": row["balance_cents"]})
+        return {"name": customer, "deletedAt": None, "balanceCents": row["balance_cents"]}
 
     def price(self) -> int:
         with self._connection() as con:
@@ -708,6 +774,7 @@ class Core(RechargeCodeMixin):
         cpu, ram, sys_disk, data_disk, free_test, opaque = self._spec(spec)
         mode = spec.get("mode", "gpu")
         with self._transaction() as con:
+            self._require_active_user(con, owner)
             existing = con.execute(
                 "SELECT * FROM instances WHERE owner = ? AND idempotency = ?",
                 (owner, idempotency),
@@ -716,8 +783,6 @@ class Core(RechargeCodeMixin):
                 if (existing["cpu"], existing["ram"], existing["sys_disk"], existing["data_disk"]) != (cpu, ram, sys_disk, data_disk):
                     raise ValueError("idempotency key already used for a different instance specification")
                 return self._public(existing)
-            if con.execute("SELECT 1 FROM users WHERE name = ?", (owner,)).fetchone() is None:
-                raise PermissionError("unknown owner")
             self._capacity(con, 0, 0, sys_disk, data_disk, allocate=False)
             now = _now()
             cur = con.execute(
@@ -749,6 +814,7 @@ class Core(RechargeCodeMixin):
         if mode is not None and (verb != "start" or mode not in ("gpu", "headless")):
             raise ValueError("start mode must be gpu or headless")
         with self._transaction() as con:
+            self._require_active_user(con, owner)
             row = self._owned(con, owner, instance_id)
             state = row["state"]
             if verb == "start":

@@ -693,7 +693,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                     self.json(SERVICE.core.list_recharge_codes(owner,int(query.get('before',['0'])[0]),query.get('status',['all'])[0],query.get('q',[''])[0]))
                 elif path == '/api/admin/customers':
-                    self.json({'customers': SERVICE.core.customers(owner)})
+                    query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                    self.json({'customers': SERVICE.core.customers(owner, query.get('status', ['active'])[0])})
                 elif path == '/api/admin/instances':
                     self.json(SERVICE.state(owner, admin_view=True))
                 elif path == '/api/admin/audit':
@@ -766,6 +767,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.json({'ok':True},200,set_cookie=cookie); return
             if path == '/api/admin/registration-bonus':
                 self.json(SERVICE.core.set_registration_bonus(owner, body.get('cents'), body.get('expectedCents'))); return
+            customer_action = re.fullmatch(r'/api/admin/customers/([a-zA-Z0-9][a-zA-Z0-9_-]{2,31})/(delete|restore)', path)
+            if customer_action:
+                if customer_action[2] == 'delete':
+                    result = SERVICE.core.delete_customer(owner, customer_action[1], body.get('confirmName'))
+                else:
+                    result = SERVICE.core.restore_customer(owner, customer_action[1])
+                self.json({'ok': True, 'customer': result}); return
             if path=='/api/rental/order':
                 result=SERVICE.order(owner,body,self.headers.get('X-Idempotency-Key') or secrets.token_urlsafe(18)); self.json({'instance':result},202,set_cookie=cookie); return
             parts=[urllib.parse.unquote(x) for x in path.split('/') if x]
