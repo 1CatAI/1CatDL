@@ -1265,7 +1265,7 @@ class Core(RechargeCodeMixin):
                 (now, instance_id),
             )
             con.execute(
-                "UPDATE instances SET slot=NULL, endpoint=NULL, state=?, desired_action=NULL, updated_at=?, last_activity_at=? WHERE id=?",
+                "UPDATE instances SET slot=NULL, endpoint=NULL, state=?, desired_action=NULL, error=NULL, updated_at=?, last_activity_at=? WHERE id=?",
                 (new_state, now, now, instance_id),
             )
             result = con.execute("SELECT * FROM instances WHERE id=?", (instance_id,)).fetchone()

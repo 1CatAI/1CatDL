@@ -438,7 +438,16 @@ class LibvirtBackend:
                 'state': self.shared_states.get(str(instance['id']), 'pending' if enabled else 'disabled')}
 
     def stop(self, instance):
-        if self.state(instance)=='running': self.virsh('shutdown',self.name(instance))
+        if self.state(instance) != 'running':
+            return
+        try:
+            # A guest agent may be wedged under load; use the ACPI power button.
+            # The worker verifies the actual state and retains force_off fallback.
+            self.virsh('shutdown', self.name(instance), '--mode', 'acpi', timeout=15)
+        except subprocess.TimeoutExpired:
+            # QEMU may already have accepted the request; let the worker inspect
+            # power state rather than quarantining a recoverable instance.
+            print(f"instance {instance['id']}: ACPI shutdown request timed out; checking power state", flush=True)
 
     def force_off(self, instance):
         if self.state(instance) in ('running', 'stopping'):
