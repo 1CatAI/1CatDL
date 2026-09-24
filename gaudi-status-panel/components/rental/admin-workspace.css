@@ -1,0 +1,996 @@
+/* Import after rental-panel.css. Keep the workspace and its dialogs inside .admin-app.
+   Navigation: aria-current="page"; finance tabs: aria-selected="true".
+   Optional semantic colors: data-tone="info|success|warning|danger|neutral".
+   Native dialog visibility, details disclosure, and hidden attributes remain functional. */
+.admin-app {
+  --admin-bg: #f4f6f9;
+  --admin-surface: #ffffff;
+  --admin-soft: #f8f9fc;
+  --admin-text: #182230;
+  --admin-muted: #536175;
+  --admin-border: #d8dee8;
+  --admin-control-border: #7c8799;
+  --admin-accent: #4338ca;
+  --admin-accent-hover: #3730a3;
+  --admin-accent-soft: #eef2ff;
+  --admin-success: #166534;
+  --admin-success-soft: #edf7f0;
+  --admin-warning: #854d0e;
+  --admin-warning-soft: #fff8e6;
+  --admin-danger: #b42318;
+  --admin-danger-soft: #fff1f0;
+  --admin-radius: 8px;
+  min-width: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  color: var(--admin-text);
+  background: var(--admin-bg);
+  color-scheme: light;
+  font: 14px/1.5 Inter, "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-app *,
+.admin-app *::before,
+.admin-app *::after {
+  box-sizing: border-box;
+}
+
+.admin-app :is(h1, h2, h3, p, dl, dd) { margin: 0; }
+.admin-app :is(h1, h2, h3) { color: var(--admin-text); font-weight: 650; }
+.admin-app :is(h2, h3) { font-size: 16px; line-height: 1.4; }
+.admin-app small { font-size: 13px; }
+.admin-app :is(code, pre) {
+  font-family: var(--font-geist-mono, ui-monospace), Consolas, monospace;
+  font-size: 13px;
+}
+.admin-app svg { flex-shrink: 0; }
+.admin-app :is(button, input, select, textarea) {
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.4;
+}
+.admin-app button {
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.admin-app :is(button, a, input, select, textarea, summary, [tabindex]) {
+  scroll-margin-block: 16px;
+}
+.admin-app :focus-visible {
+  outline: 3px solid var(--admin-accent);
+  outline-offset: 3px;
+}
+
+/* Desktop navigation occupies exactly 200px; only the document scrolls the content. */
+.admin-app .admin-layout {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  align-items: start;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+.admin-app .admin-sidebar {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  min-width: 0;
+  height: 100vh;
+  height: 100dvh;
+  padding: 22px 12px 16px;
+  overflow-y: auto;
+  background: var(--admin-surface);
+  border-right: 1px solid var(--admin-border);
+}
+.admin-app .admin-brand {
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 0 10px;
+  color: var(--admin-text);
+  text-decoration: none;
+}
+.admin-app .admin-brand :is(img, .brand-logo) {
+  display: block;
+  width: 116px;
+  max-width: 100%;
+  height: auto;
+}
+.admin-app .admin-brand > div { min-width: 0; }
+.admin-app .admin-brand strong { display: block; font-size: 15px; }
+.admin-app .admin-brand :is(small, span) {
+  display: block;
+  color: var(--admin-muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.admin-app .admin-nav { display: grid; gap: 4px; }
+.admin-app .admin-nav :is(ul, li) {
+  display: contents;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.admin-app .admin-nav :is(a, button) {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 40px;
+  padding: 9px 12px;
+  color: var(--admin-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.4;
+  text-align: left;
+  text-decoration: none;
+}
+.admin-app .admin-nav :is(a, button):hover {
+  color: var(--admin-text);
+  background: var(--admin-soft);
+}
+.admin-app .admin-nav :is(a, button):is([aria-current="page"], [aria-selected="true"], .is-active) {
+  color: var(--admin-accent);
+  background: var(--admin-accent-soft);
+  border-color: #c7d2fe;
+  box-shadow: inset 3px 0 var(--admin-accent);
+  font-weight: 650;
+}
+.admin-app .admin-nav :is(b, .admin-badge) {
+  margin-left: auto;
+  padding: 0 6px;
+  font-size: 13px;
+}
+.admin-app .admin-nav-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  margin-top: auto;
+  padding: 14px 6px 0;
+  color: var(--admin-muted);
+  border-top: 1px solid var(--admin-border);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.admin-app .admin-content { min-width: 0; padding: 22px 24px 40px; }
+.admin-app .admin-content > * { min-width: 0; }
+.admin-app .admin-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  margin-bottom: 18px;
+}
+.admin-app .admin-heading { min-width: 0; }
+.admin-app .admin-heading h1 { font-size: 23px; line-height: 1.35; letter-spacing: -.025em; }
+.admin-app .admin-heading :is(p, small) {
+  display: block;
+  margin-top: 4px;
+  color: var(--admin-muted);
+  font-size: 13px;
+}
+.admin-app .admin-topbar-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Compact summaries form one quiet strip instead of oversized feature cards. */
+.admin-app .admin-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 170px), 1fr));
+  gap: 1px;
+  margin-bottom: 16px;
+  overflow: hidden;
+  background: var(--admin-border);
+  border: 1px solid var(--admin-border);
+  border-radius: var(--admin-radius);
+}
+.admin-app .admin-stat {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  min-width: 0;
+  padding: 12px 16px;
+  background: var(--admin-surface);
+  text-align: left;
+  border: 0;
+}
+.admin-app .admin-stat :is(span, small, dt) { color: var(--admin-muted); font-size: 13px; }
+.admin-app .admin-stat :is(strong, dd) {
+  color: var(--admin-text);
+  font-size: 23px;
+  font-weight: 650;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+.admin-app .admin-stat[data-tone="warning"] :is(strong, dd) { color: var(--admin-warning); }
+.admin-app .admin-stat[data-tone="danger"] :is(strong, dd) { color: var(--admin-danger); }
+.admin-app .admin-stat.is-warning strong { color: var(--admin-danger); }
+.admin-app button.admin-stat:hover { background: var(--admin-soft); }
+.admin-app .admin-nav-footer :is(button, span) { display: flex; align-items: center; gap: 8px; padding: 6px; text-align: left; }
+.admin-app .admin-heading > span { color: var(--admin-muted); font-size: 12px; display: block; margin-bottom: 7px; }
+.admin-app .admin-notice.is-error { color: var(--admin-danger); background: var(--admin-danger-soft); border-color: #ecc3bd; }
+.admin-app .admin-notice.is-success { color: var(--admin-success); background: var(--admin-success-soft); border-color: #bfdcc8; }
+.admin-app .admin-badge.is-online { color: var(--admin-success); background: var(--admin-success-soft); }
+.admin-app .admin-badge.is-offline { color: var(--admin-danger); background: var(--admin-danger-soft); }
+.admin-app .admin-pagination > div { display: flex; align-items: center; gap: 10px; }
+.admin-app .admin-dialog-body .admin-dialog-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
+.admin-app .admin-detail-grid > div > span { display: block; color: var(--admin-muted); font-size: 13px; margin-bottom: 5px; }
+.admin-app .admin-detail-grid > div > strong { display: block; }
+.admin-app .admin-primary-cell > .admin-subtext { display: flex; }
+.admin-app .admin-primary-cell > .admin-link:first-child { font-weight: 600; text-decoration: none; font-size: 14px; }
+.admin-app .admin-node-heading h2 { display: flex; align-items: center; gap: 8px; }
+.admin-app .admin-node-storage { margin-block: 18px; }
+.admin-app .admin-node-storage p { margin-top: 6px; }
+.admin-app .rental-card > .admin-help { padding: 0 16px 12px; }
+.admin-app .admin-scope { margin-bottom: 12px; }
+.admin-app .rental-card > .admin-scope { margin: 10px 14px; }
+
+/* Shared controls retain readable labels and explicit keyboard focus. */
+.admin-app :is(.admin-primary-button, .admin-icon-button, .rental-small-button, .rental-primary-button),
+.admin-app button.admin-more,
+.admin-app .admin-more > summary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  max-width: 100%;
+  margin: 0;
+  padding: 6px 10px;
+  color: var(--admin-text);
+  background: var(--admin-surface);
+  border: 1px solid var(--admin-control-border);
+  border-radius: 6px;
+  box-shadow: none;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.admin-app :is(.admin-icon-button, .rental-small-button):hover:not(:disabled),
+.admin-app button.admin-more:hover:not(:disabled),
+.admin-app .admin-more > summary:hover { background: #edf0f5; border-color: var(--admin-muted); }
+.admin-app :is(.admin-primary-button, .rental-primary-button) {
+  width: auto;
+  color: #ffffff;
+  background: var(--admin-accent);
+  border-color: var(--admin-accent);
+  font-weight: 600;
+}
+.admin-app :is(.admin-primary-button, .rental-primary-button):hover:not(:disabled) {
+  color: #ffffff;
+  background: var(--admin-accent-hover);
+  border-color: var(--admin-accent-hover);
+}
+.admin-app .admin-icon-button { width: 34px; flex-shrink: 0; padding: 7px; }
+.admin-app input:where(:not([type="checkbox"], [type="radio"], [type="range"], [type="hidden"], [type="submit"], [type="button"], [type="reset"], [type="image"], [type="color"])),
+.admin-app :is(select, textarea),
+.admin-app .rental-field :is(input:where(:not([type="range"], [type="checkbox"], [type="radio"])), select),
+.admin-app .rental-code-result textarea {
+  min-width: 0;
+  min-height: 36px;
+  height: auto;
+  max-width: 100%;
+  padding: 7px 10px;
+  color: var(--admin-text);
+  background: var(--admin-surface);
+  border: 1px solid var(--admin-control-border);
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 1.4;
+}
+.admin-app :is(input, textarea)::placeholder { color: var(--admin-muted); opacity: 1; }
+.admin-app textarea { width: 100%; min-height: 96px; resize: vertical; }
+.admin-app :is(input[type="checkbox"], input[type="radio"]) {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  margin: 3px 0;
+  accent-color: var(--admin-accent);
+}
+.admin-app .rental-field { min-width: 0; }
+.admin-app .rental-field > span { margin-bottom: 5px; color: var(--admin-muted); font-size: 13px; }
+.admin-app :is(input, select, textarea)[aria-invalid="true"] { border-color: var(--admin-danger); }
+.admin-app .rental-field :is(input, select):focus { border-color: var(--admin-accent); box-shadow: none; }
+.admin-app :is(input, select, textarea):focus-visible,
+.admin-app .rental-field :is(input, select):focus-visible {
+  outline: 3px solid var(--admin-accent);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+.admin-app :is(.admin-toolbar, .rental-list-tools) {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--admin-surface);
+  border: 1px solid var(--admin-border);
+  border-radius: var(--admin-radius);
+}
+.admin-app .admin-toolbar { margin-bottom: 12px; }
+.admin-app .rental-card > :is(.admin-toolbar, .rental-list-tools) {
+  margin: 0;
+  border: 0;
+  border-bottom: 1px solid var(--admin-border);
+  border-radius: 0;
+}
+.admin-app .admin-search,
+.admin-app .rental-list-tools > label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 260px;
+  min-width: 0;
+  max-width: 440px;
+  min-height: 36px;
+  padding: 0 10px;
+  color: var(--admin-muted);
+  background: var(--admin-surface);
+  border: 1px solid var(--admin-control-border);
+  border-radius: 6px;
+}
+.admin-app .admin-search input,
+.admin-app .rental-list-tools > label input {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  margin: 0;
+  padding: 6px 0;
+  color: var(--admin-text);
+  background: transparent;
+  border: 0;
+  border-radius: 2px;
+  font-size: 14px;
+}
+.admin-app .admin-filter { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.admin-app .admin-filter > span { color: var(--admin-muted); font-size: 13px; }
+.admin-app select.admin-filter,
+.admin-app .admin-filter select { display: block; min-width: 128px; max-width: 100%; }
+.admin-app .admin-scope {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 8px;
+  color: var(--admin-accent);
+  background: var(--admin-accent-soft);
+  border: 1px solid #c7d2fe;
+  border-radius: 6px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+/* No fixed height or max-height: tables grow with their rows. With overflow-x:auto,
+   overflow-y computes to auto; an unconstrained height prevents a vertical scroll pane. */
+.admin-app :is(.admin-table-wrap, .rental-table-wrap) {
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  max-height: none;
+  overflow-x: auto;
+  overflow-y: visible;
+  background: var(--admin-surface);
+  border: 1px solid var(--admin-border);
+  border-radius: var(--admin-radius);
+  scroll-padding-inline: 12px;
+}
+.admin-app .rental-card > :is(.admin-table-wrap, .rental-table-wrap) { border: 0; border-radius: 0; }
+.admin-app :is(.admin-table, .rental-table) {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: separate;
+  border-spacing: 0;
+  color: var(--admin-text);
+  background: var(--admin-surface);
+  font-size: 14px;
+  line-height: 1.45;
+  text-align: left;
+}
+.admin-app :is(.admin-table, .rental-table) :is(th, td) {
+  padding: 10px 14px;
+  color: var(--admin-text);
+  border-bottom: 1px solid var(--admin-border);
+  vertical-align: middle;
+  font-variant-numeric: tabular-nums;
+}
+.admin-app :is(.admin-table, .rental-table) th {
+  position: static;
+  color: var(--admin-muted);
+  background: var(--admin-soft);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.admin-app :is(.admin-table, .rental-table) tbody > tr:last-child > :is(th, td) { border-bottom: 0; }
+.admin-app :is(.admin-table, .rental-table) tbody > tr:hover > td { background: var(--admin-soft); }
+.admin-app :is(.admin-table, .rental-table) tbody > tr:focus-within > td { background: var(--admin-accent-soft); }
+.admin-app :is(.admin-table, .rental-table) td:last-child { white-space: normal; }
+.admin-app .admin-primary-cell { min-width: 160px; max-width: 320px; overflow-wrap: anywhere; }
+.admin-app .admin-primary-cell > :is(strong, a) { font-weight: 600; }
+.admin-app .admin-primary-cell > strong { display: block; }
+.admin-app .admin-subtext,
+.admin-app :is(.rental-account-meta, .rental-code-sub) {
+  display: block;
+  margin-top: 3px;
+  color: var(--admin-muted);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.admin-app .admin-row-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 132px; }
+.admin-app .admin-instance-table td:nth-child(2) { min-width: 112px; }
+.admin-app .admin-instance-table td:last-child { min-width: 200px; }
+.admin-app .admin-instance-table .admin-row-actions { flex-wrap: nowrap; }
+.admin-app .admin-ellipsis { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; max-width: 260px; }
+.admin-app .admin-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 4px;
+  min-height: 28px;
+  padding: 2px 0;
+  color: var(--admin-accent);
+  background: transparent;
+  border: 0;
+  border-radius: 2px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  overflow-wrap: anywhere;
+}
+.admin-app .admin-link:hover:not(:disabled) { color: var(--admin-accent-hover); text-decoration-thickness: 2px; }
+.admin-app :is(.admin-pagination, .rental-code-pagination) {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 14px;
+  color: var(--admin-muted);
+  font-size: 13px;
+}
+.admin-app :is(.admin-pagination, .rental-code-pagination) > :is(span, p) { margin-right: auto; }
+.admin-app :is(.admin-empty, .rental-empty) {
+  min-height: 120px;
+  padding: 28px 16px;
+  color: var(--admin-muted);
+  font-size: 14px;
+  text-align: center;
+}
+.admin-app .admin-empty:not(td) { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
+.admin-app .admin-empty strong { color: var(--admin-text); font-weight: 600; }
+
+/* State text stays explicit in markup; color supplements it. */
+.admin-app :is(.admin-badge, .rental-state, .rental-account-status, .rental-code-status) {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  color: var(--admin-muted);
+  background: #eef1f5;
+  border: 1px solid var(--admin-border);
+  border-radius: 5px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.admin-app :is(.admin-notice, .rental-notice) {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  color: var(--admin-accent);
+  background: var(--admin-accent-soft);
+  border: 1px solid #c7d2fe;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.admin-app :is(.admin-notice, .rental-notice) > svg { margin-top: 2px; }
+.admin-app :is(.admin-notice, .rental-notice) > div { min-width: 0; }
+.admin-app :is(.admin-notice, .rental-notice) > button { flex-shrink: 0; margin-left: auto; }
+.admin-app :is(.admin-badge, .admin-notice)[data-tone="info"],
+.admin-app .rental-code-status-available { color: var(--admin-accent); background: var(--admin-accent-soft); border-color: #c7d2fe; }
+.admin-app :is(.admin-badge, .admin-notice)[data-tone="success"],
+.admin-app :is(.rental-state-running, .rental-state-available, .rental-code-status-redeemed, .rental-account-status:not(.is-deleted), .rental-notice-success) {
+  color: var(--admin-success);
+  background: var(--admin-success-soft);
+  border-color: #bfdcc8;
+}
+.admin-app :is(.admin-badge, .admin-notice)[data-tone="warning"],
+.admin-app :is(.rental-state-creating, .rental-state-starting, .rental-state-stopping) {
+  color: var(--admin-warning);
+  background: var(--admin-warning-soft);
+  border-color: #e3ce9d;
+}
+.admin-app :is(.admin-badge, .admin-notice)[data-tone="danger"],
+.admin-app :is(.rental-state-error, .rental-state-repair_required, .rental-notice-error) {
+  color: var(--admin-danger);
+  background: var(--admin-danger-soft);
+  border-color: #ecc3bd;
+}
+.admin-app :is(.admin-badge, .admin-notice)[data-tone="neutral"],
+.admin-app :is(.rental-account-status.is-deleted, .rental-code-status-revoked) {
+  color: var(--admin-muted);
+  background: #eef1f5;
+  border-color: var(--admin-border);
+}
+.admin-app :is(.admin-danger, .rental-text-error, .rental-inline-error) { color: var(--admin-danger); }
+.admin-app :is(.admin-table, .rental-table) :is(.admin-danger, .rental-text-error) { color: var(--admin-danger); }
+.admin-app :is(.admin-link.admin-danger, .rental-small-danger, button.admin-danger) { color: var(--admin-danger); }
+.admin-app :is(.rental-small-danger, .admin-primary-button.admin-danger) {
+  background: var(--admin-danger-soft);
+  border-color: var(--admin-danger);
+}
+.admin-app :is(.rental-small-danger, button.admin-danger):hover:not(:disabled) {
+  color: #8f1d14;
+  background: #ffe2de;
+  border-color: var(--admin-danger);
+}
+.admin-app :is(.admin-muted, .admin-help) { color: var(--admin-muted); font-size: 13px; line-height: 1.6; }
+.admin-app .admin-help { margin-top: 10px; overflow-wrap: anywhere; }
+.admin-app .admin-help > summary { cursor: pointer; padding-block: 6px; }
+.admin-app .admin-help[open] > summary { margin-bottom: 6px; color: var(--admin-text); }
+
+/* A native dialog gets one scrolling body; a closed dialog must never be displayed. */
+.admin-app .admin-dialog {
+  width: min(780px, calc(100vw - 32px));
+  max-width: none;
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  color: var(--admin-text);
+  background: var(--admin-surface);
+  border: 1px solid var(--admin-border);
+  border-radius: 10px;
+  box-shadow: 0 18px 60px #18223026;
+  font-size: 14px;
+}
+.admin-app .admin-dialog[open] { display: flex; flex-direction: column; }
+.admin-app .admin-dialog::backdrop,
+.admin-app .rental-dialog::backdrop { background: #18223080; }
+.admin-app .admin-dialog > .admin-dialog-head,
+.admin-app .admin-dialog > .admin-dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px 18px;
+  background: var(--admin-surface);
+}
+.admin-app .admin-dialog-head { border-bottom: 1px solid var(--admin-border); }
+.admin-app .admin-dialog-head :is(h2, h3) { font-size: 17px; }
+.admin-app .admin-dialog > .admin-dialog-body {
+  display: block;
+  min-height: 0;
+  min-width: 0;
+  padding: 18px;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+}
+.admin-app .admin-dialog > .admin-dialog-actions { justify-content: flex-end; border-top: 1px solid var(--admin-border); }
+.admin-app .admin-dialog-body > * + * { margin-top: 16px; }
+.admin-app .admin-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 20px;
+  margin: 0;
+}
+.admin-app .admin-detail-grid > div { min-width: 0; padding: 10px 0; border-bottom: 1px solid var(--admin-border); }
+.admin-app .admin-detail-grid :is(dt, small, label) { display: block; margin-bottom: 4px; color: var(--admin-muted); font-size: 13px; }
+.admin-app .admin-detail-grid :is(dd, strong, code) { margin: 0; color: var(--admin-text); overflow-wrap: anywhere; }
+.admin-app .admin-detail-grid > :is(dt, dd) { padding-block: 8px; border-bottom: 1px solid var(--admin-border); }
+.admin-app .rental-dialog:not(.admin-dialog) {
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  padding: 22px;
+  overflow-y: auto;
+  color: var(--admin-text);
+  background: var(--admin-surface);
+  border-color: var(--admin-border);
+  border-radius: 10px;
+}
+.admin-app .rental-dialog:not(.admin-dialog) p { color: var(--admin-muted); font-size: 14px; line-height: 1.65; }
+.admin-app .rental-dialog:not(.admin-dialog) > div { flex-wrap: wrap; }
+
+/* Node capacity remains dense, with readable GPU labels and ordinary document flow. */
+.admin-app .admin-node-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 370px), 1fr));
+  align-items: start;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.admin-app .admin-node-card {
+  min-width: 0;
+  padding: 16px;
+  background: var(--admin-surface);
+  border: 1px solid var(--admin-border);
+  border-radius: var(--admin-radius);
+}
+.admin-app .admin-node-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+.admin-app .admin-node-heading :is(h2, h3, strong) { font-size: 16px; }
+.admin-app .admin-host-overview {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 16px;
+  padding: 12px;
+  background: #f7f8fb;
+  border: 1px solid var(--admin-border);
+  border-radius: 7px;
+}
+.admin-app .admin-host-overview.is-pending {
+  display: flex;
+  align-items: center;
+  min-height: 76px;
+  color: var(--admin-muted);
+}
+.admin-app .admin-host-overview.is-pending > div { display: grid; gap: 2px; }
+.admin-app .admin-host-overview.is-pending strong { color: var(--admin-text); }
+.admin-app .admin-host-specs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.admin-app .admin-host-specs > div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 9px;
+  min-width: 0;
+  padding: 10px;
+  background: var(--admin-surface);
+  border: 1px solid var(--admin-border);
+  border-radius: 6px;
+}
+.admin-app .admin-host-specs svg { grid-row: 1 / 4; margin-top: 2px; color: var(--admin-accent); }
+.admin-app .admin-host-specs span,
+.admin-app .admin-host-specs small { color: var(--admin-muted); }
+.admin-app .admin-host-specs strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--admin-text);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.admin-app .admin-resource-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.admin-app .admin-resource-meter {
+  min-width: 0;
+  padding: 10px;
+  background: var(--admin-surface);
+  border: 1px solid var(--admin-border);
+  border-radius: 6px;
+}
+.admin-app .admin-resource-meter > div { display: flex; justify-content: space-between; gap: 8px; }
+.admin-app .admin-resource-meter span,
+.admin-app .admin-resource-meter small { color: var(--admin-muted); }
+.admin-app .admin-resource-meter strong { color: var(--admin-text); font-size: 15px; }
+.admin-app .admin-resource-meter progress {
+  display: block;
+  width: 100%;
+  height: 7px;
+  margin: 7px 0 5px;
+  accent-color: var(--admin-accent);
+}
+.admin-app .admin-resource-meter.is-warning progress { accent-color: var(--admin-warning); }
+.admin-app .admin-resource-meter small { display: block; overflow-wrap: anywhere; }
+.admin-app .admin-power-panel {
+  min-width: 0;
+  overflow: hidden;
+  background: #151d2b;
+  border: 1px solid #263348;
+  border-radius: 7px;
+  color: #e8edf6;
+}
+.admin-app .admin-power-panel > header,
+.admin-app .admin-power-panel > footer,
+.admin-app .admin-power-history { padding-inline: 12px; }
+.admin-app .admin-power-panel > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-block: 11px;
+  border-bottom: 1px solid #2d3a50;
+}
+.admin-app .admin-power-panel > header > div { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.admin-app .admin-power-panel > header svg { color: #8cb4ff; }
+.admin-app .admin-power-panel > header strong { display: block; color: #f8fafc; font-size: 14px; }
+.admin-app .admin-power-panel > header span,
+.admin-app .admin-power-panel > footer,
+.admin-app .admin-power-history small { color: #9eabc0; font-size: 12px; }
+.admin-app .admin-power-status {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 6px;
+  color: #cbd5e1;
+  font-size: 12px;
+}
+.admin-app .admin-power-status i { width: 7px; height: 7px; background: #f59e0b; border-radius: 50%; }
+.admin-app .admin-power-status.is-live i { background: #4ade80; }
+.admin-app .admin-power-status.is-stale i { background: #fb7185; }
+.admin-app .admin-power-kpis {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  border-bottom: 1px solid #2d3a50;
+}
+.admin-app .admin-power-kpis > div { min-width: 0; padding: 12px; border-right: 1px solid #2d3a50; }
+.admin-app .admin-power-kpis > div:last-child { border-right: 0; }
+.admin-app .admin-power-kpis span,
+.admin-app .admin-power-kpis small { display: block; color: #9eabc0; font-size: 12px; }
+.admin-app .admin-power-kpis strong { display: block; margin: 4px 0 2px; color: #f8fafc; font-size: 18px; line-height: 1.25; }
+.admin-app .admin-power-history { padding-block: 10px 8px; }
+.admin-app .admin-power-history > div { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
+.admin-app .admin-power-history > div > span { color: #9eabc0; font: 600 11px/1.3 var(--font-geist-mono, ui-monospace), Consolas, monospace; letter-spacing: .08em; }
+.admin-app .admin-power-chart { display: block; width: 100%; height: 88px; overflow: visible; }
+.admin-app .admin-power-area { fill: rgba(79, 140, 255, .15); }
+.admin-app .admin-power-line { fill: none; stroke: #76a7ff; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.admin-app .admin-power-empty { display: flex; align-items: center; justify-content: center; gap: 7px; min-height: 88px; color: #9eabc0; font-size: 13px; }
+.admin-app .admin-power-panel > footer { padding-block: 8px 10px; border-top: 1px solid #2d3a50; overflow-wrap: anywhere; }
+.admin-app .admin-gpu-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
+.admin-app .admin-gpu {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 9px;
+  color: var(--admin-muted);
+  background: var(--admin-soft);
+  border: 1px solid var(--admin-border);
+  border-radius: 6px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.admin-app .admin-gpu :is(strong, b) { color: var(--admin-text); font-size: 14px; }
+.admin-app .admin-gpu:is([data-state="available"], .is-free) { color: var(--admin-success); background: var(--admin-success-soft); border-color: #bfdcc8; }
+.admin-app .admin-gpu:is([data-state="busy"], [data-state="running"], .is-busy) { color: var(--admin-accent); background: var(--admin-accent-soft); border-color: #c7d2fe; }
+.admin-app .admin-gpu:is([data-state="error"], .is-error) { color: var(--admin-danger); background: var(--admin-danger-soft); border-color: #ecc3bd; }
+.admin-app .admin-node-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 16px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--admin-border);
+}
+.admin-app .admin-node-metrics > * { min-width: 0; overflow-wrap: anywhere; }
+.admin-app .admin-node-metrics :is(span, dt, small) { color: var(--admin-muted); font-size: 13px; }
+.admin-app .admin-node-metrics :is(strong, dd) { display: block; margin-top: 2px; color: var(--admin-text); font-weight: 600; }
+.admin-app :is(.admin-node-card, .rental-storage) progress { width: 100%; height: 8px; margin-block: 10px; accent-color: var(--admin-accent); }
+
+.admin-app .admin-subnav { display: flex; gap: 4px; margin-bottom: 14px; padding: 3px 3px 0; overflow-x: auto; border-bottom: 1px solid var(--admin-border); }
+.admin-app .admin-subnav :is(a, button) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex-shrink: 0;
+  min-height: 38px;
+  padding: 8px 13px;
+  color: var(--admin-muted);
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 4px 4px 0 0;
+  font-size: 14px;
+  text-decoration: none;
+}
+.admin-app .admin-subnav :is(a, button):hover { color: var(--admin-text); background: #e9edf5; }
+.admin-app .admin-subnav :is(a, button):is([aria-selected="true"], [aria-current="page"], .is-active) { color: var(--admin-accent); border-bottom-color: var(--admin-accent); font-weight: 650; }
+.admin-app :is(.admin-nav, .admin-subnav) :is(a, button):focus-visible { outline-offset: -3px; }
+.admin-app .admin-settings { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; max-width: 960px; }
+.admin-app .admin-settings > .rental-card { margin: 0; }
+.admin-app details.admin-more { display: inline-block; max-width: 100%; vertical-align: top; }
+.admin-app .admin-more > summary { width: fit-content; cursor: pointer; list-style: none; }
+.admin-app .admin-more > summary::-webkit-details-marker { display: none; }
+.admin-app .admin-more > summary::after { content: "+"; margin-left: 4px; font-size: 14px; }
+.admin-app .admin-more[open] > summary::after { content: "−"; }
+/* Keep disclosure actions in flow so horizontal table overflow cannot clip a menu. */
+.admin-app .admin-more[open] > :is(div, ul) {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  margin: 8px 0 0;
+  padding: 8px;
+  background: var(--admin-surface);
+  border: 1px solid var(--admin-border);
+  border-radius: 6px;
+  list-style: none;
+}
+
+/* Existing rental panels blend in without changing their markup or business behavior. */
+.admin-app .rental-card { min-width: 0; margin-bottom: 16px; overflow: visible; border-color: var(--admin-border); border-radius: var(--admin-radius); box-shadow: none; }
+.admin-app .rental-card-head { flex-wrap: wrap; gap: 10px; padding: 14px 16px; border-bottom-color: var(--admin-border); }
+.admin-app .rental-card h2 { margin: 0; font-size: 16px; letter-spacing: normal; }
+.admin-app :is(.rental-kicker, .rental-step-chip, .rental-card-head-hint, .rental-account-count) { color: var(--admin-muted); font-size: 13px; letter-spacing: normal; }
+.admin-app .rental-card-head-hint { display: flex; }
+.admin-app :is(.rental-admin-body, .rental-code-body, .rental-form, .rental-storage) { padding: 16px; }
+.admin-app :is(.rental-account-help, .rental-billing-info, .rental-code-summary) { padding: 10px 16px; color: var(--admin-muted); font-size: 13px; line-height: 1.6; }
+.admin-app :is(.rental-registration-description, .rental-code-intro) { margin-bottom: 14px; color: var(--admin-muted); font-size: 14px; line-height: 1.6; }
+.admin-app .rental-registration-form { gap: 10px; }
+.admin-app .rental-registration-form button,
+.admin-app .rental-admin-controls .rental-small-button { min-height: 36px; }
+.admin-app .rental-admin-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.admin-app .rental-code-form { display: grid; gap: 14px; min-width: 0; margin: 0; }
+.admin-app .rental-code-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 0; }
+.admin-app .rental-code-checkout { flex-wrap: wrap; gap: 12px 16px; margin-top: 14px; padding: 12px; background: var(--admin-soft); border-color: var(--admin-border); border-radius: 6px; }
+.admin-app .rental-code-checkout > div { min-width: 0; }
+.admin-app .rental-code-checkout > label { flex-basis: 240px; color: var(--admin-text); font-size: 13px; }
+.admin-app .rental-code-checkout strong { margin: 3px 0; color: var(--admin-text); font-size: 21px; }
+.admin-app .rental-code-checkout :is(span, small),
+.admin-app :is(.rental-code-tip, .rental-storage p, .rental-storage small) { color: var(--admin-muted); font-size: 13px; }
+.admin-app .rental-code-result { margin-top: 14px; padding: 14px; background: var(--admin-success-soft); border-color: #bfdcc8; border-radius: 6px; }
+.admin-app .rental-code-result :is(h3, p, small) { color: var(--admin-success); font-size: 13px; }
+.admin-app .rental-code-result h3 { font-size: 15px; }
+.admin-app .rental-code-result textarea { min-height: 96px; font-size: 13px; line-height: 1.65; }
+.admin-app .rental-code-summary { gap: 8px 20px; }
+.admin-app .rental-code-summary b { color: var(--admin-text); }
+.admin-app .rental-code-note-cell { max-width: 280px; }
+.admin-app :is(.rental-text-credit, .rental-table td.rental-text-credit, .rental-code-success) { color: var(--admin-success); }
+.admin-app :is(.rental-code-message, .rental-account-message, .rental-inline-error) { font-size: 13px; }
+.admin-app .rental-audit summary { padding: 12px 16px; color: var(--admin-muted); font-size: 13px; }
+
+/* Match disabled controls without fading their text into low-contrast gray. */
+.admin-app button:disabled,
+.admin-app :is(input, select, textarea):disabled,
+.admin-app [aria-disabled="true"] {
+  color: var(--admin-muted);
+  background: #eef1f5;
+  border-color: var(--admin-border);
+  box-shadow: none;
+  opacity: 1;
+  cursor: not-allowed;
+}
+.admin-app :is(.admin-primary-button, .rental-primary-button, .rental-small-button):disabled {
+  color: var(--admin-muted);
+  background: #eef1f5;
+  border-color: var(--admin-border);
+  box-shadow: none;
+}
+
+@media (max-width: 1100px) {
+  .admin-app .admin-content { padding: 20px 18px 32px; }
+  .admin-app .admin-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .admin-app .admin-topbar-actions { gap: 6px; }
+  .admin-app .admin-power-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .admin-app .admin-power-kpis > div:nth-child(3) { border-right: 0; }
+  .admin-app .admin-power-kpis > div:nth-child(n + 4) { border-top: 1px solid #2d3a50; }
+}
+
+@media (max-width: 800px) {
+  .admin-app .admin-layout { display: block; }
+  .admin-app .admin-sidebar {
+    position: static;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    height: auto;
+    padding: 12px 12px 0;
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid var(--admin-border);
+  }
+  .admin-app .admin-brand { grid-column: 1; grid-row: 1; padding: 0; }
+  .admin-app .admin-brand :is(img, .brand-logo) { width: 104px; }
+  .admin-app .admin-nav {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    display: flex;
+    gap: 4px;
+    min-width: 0;
+    padding: 3px 0 8px;
+    overflow-x: auto;
+    scroll-padding-inline: 8px;
+  }
+  .admin-app .admin-nav :is(a, button) { justify-content: center; flex: 1 0 auto; min-height: 42px; padding: 9px 12px; white-space: nowrap; }
+  .admin-app .admin-nav :is(a, button):is([aria-current="page"], [aria-selected="true"], .is-active) { box-shadow: inset 0 -3px var(--admin-accent); }
+  .admin-app .admin-nav-footer { grid-column: 2; grid-row: 1; flex-direction: row; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; max-width: 46vw; margin: 0; padding: 0; border: 0; }
+  .admin-app .admin-content { padding: 18px 14px 28px; }
+  .admin-app .admin-topbar { align-items: flex-start; gap: 10px; margin-bottom: 14px; }
+  .admin-app .admin-heading h1 { font-size: 21px; }
+  .admin-app .admin-topbar-actions { width: 100%; }
+  .admin-app :is(.admin-toolbar, .rental-list-tools) { gap: 8px; padding: 10px; }
+  .admin-app .admin-search,
+  .admin-app .rental-list-tools > label { flex-basis: 100%; max-width: none; }
+  .admin-app .admin-filter { flex: 1 1 140px; }
+  .admin-app .admin-filter select { flex: 1; min-width: 0; }
+  .admin-app :is(input, select, textarea),
+  .admin-app .rental-field :is(input:where(:not([type="range"], [type="checkbox"], [type="radio"])), select),
+  .admin-app .admin-search input,
+  .admin-app .rental-list-tools > label input,
+  .admin-app .rental-code-result textarea { font-size: 16px; }
+  .admin-app .admin-detail-grid { grid-template-columns: minmax(0, 1fr); }
+  .admin-app .admin-dialog { width: calc(100vw - 20px); max-height: calc(100dvh - 20px); }
+  .admin-app .admin-dialog > :is(.admin-dialog-head, .admin-dialog-body, .admin-dialog-actions) { padding: 14px; }
+  .admin-app .admin-resource-grid { grid-template-columns: minmax(0, 1fr); }
+  .admin-app .admin-power-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .admin-app .admin-power-kpis > div:nth-child(3) { border-right: 1px solid #2d3a50; }
+  .admin-app .admin-power-kpis > div:nth-child(even) { border-right: 0; }
+  .admin-app .admin-power-kpis > div:nth-child(n + 3) { border-top: 1px solid #2d3a50; }
+}
+
+@media (max-width: 480px) {
+  .admin-app .admin-content { padding-inline: 10px; }
+  .admin-app .admin-stat { padding: 10px 12px; }
+  .admin-app .admin-stat :is(strong, dd) { font-size: 21px; }
+  .admin-app .admin-node-grid { grid-template-columns: minmax(0, 1fr); }
+  .admin-app .admin-node-card { padding: 12px; }
+  .admin-app .admin-gpu-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .admin-app .admin-host-specs,
+  .admin-app .admin-power-kpis { grid-template-columns: minmax(0, 1fr); }
+  .admin-app .admin-power-kpis > div { border-right: 0; border-top: 1px solid #2d3a50; }
+  .admin-app .admin-power-kpis > div:first-child { border-top: 0; }
+  .admin-app .admin-power-chart { height: 72px; }
+  .admin-app :is(.rental-code-fields, .rental-admin-controls) { grid-template-columns: minmax(0, 1fr); }
+  .admin-app .rental-registration-form .rental-field { max-width: none; flex-basis: 100%; }
+  .admin-app .rental-code-checkout .rental-primary-button { width: 100%; }
+  .admin-app :is(.admin-pagination, .rental-code-pagination) { justify-content: flex-start; }
+  .admin-app :is(.admin-pagination, .rental-code-pagination) > :is(span, p) { flex-basis: 100%; }
+}
+
+@media (pointer: coarse) {
+  .admin-app :is(.admin-primary-button, .admin-icon-button, .admin-link, .rental-small-button, .rental-primary-button),
+  .admin-app .admin-nav :is(a, button),
+  .admin-app .admin-subnav :is(a, button),
+  .admin-app button.admin-more,
+  .admin-app .admin-more > summary { min-width: 44px; min-height: 44px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .admin-app,
+  .admin-app *,
+  .admin-app *::before,
+  .admin-app *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+
+@media (forced-colors: active) {
+  .admin-app { --admin-control-border: ButtonText; --admin-border: CanvasText; }
+  .admin-app :focus-visible { outline-color: Highlight; }
+  .admin-app .admin-nav :is(a, button):is([aria-current="page"], [aria-selected="true"], .is-active),
+  .admin-app .admin-subnav :is(a, button):is([aria-selected="true"], [aria-current="page"], .is-active) { border-color: Highlight; outline: 1px solid Highlight; outline-offset: -1px; }
+  .admin-app .admin-link { color: LinkText; }
+}
+
+/* Explicit display rules must not revive inactive panels or closed native dialogs. */
+.admin-app[hidden],
+.admin-app [hidden],
+.admin-app dialog:not([open]) { display: none !important; }

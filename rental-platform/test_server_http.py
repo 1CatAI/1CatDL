@@ -57,6 +57,88 @@ class ServerHttpTests(unittest.TestCase):
             self.assertEqual(response.headers["Content-Length"], str(len(body)))
             self.assertEqual(response.read(), body)
 
+    def test_gift_disk_shows_total_but_charges_only_purchased_size(self):
+        service = server.SERVICE
+        owner = 'gift-disk-http'
+        self.request('/api/auth/register', 'POST', {'name': owner, 'password': 'test gift disk password'})
+        service.core.ensure_admin('gift-disk-admin', 'test gift disk admin password')
+        service.core.recharge('gift-disk-admin', owner, 10000)
+        row = service.core.order(owner, {'data': 200}, 'gift-http')
+        service.core.action(owner, row['id'], 'start')
+        service.core.mark_running(row['id'])
+        service.core.record_storage_gift('gift-disk-admin', owner, row['id'], 400,
+                                        expected_gift_gib=0, verified_total_gib=600)
+        status, body = self.request('/api/rental/state')
+        self.assertEqual(status, 200)
+        item = next(r for r in body['instances'] if r['id'] == str(row['id']))
+        self.assertEqual((item['dataDiskGiB'], item['billableDataDiskGiB'], item['giftDataDiskGiB']), (600, 200, 400))
+        self.assertEqual(item['storageCnyPerDay'], 0.924)
+        self.assertIn('赠送400GiB', item['message'])
+        self.assertEqual(server.Service.backend_instance(service.core.list_instances(owner)[0])['data_disk'], 200)
+
+    def test_customer_can_downgrade_eight_card_instance_without_losing_gift_disk(self):
+        service = server.SERVICE
+        owner = 'plan-switch-http'
+        self.request('/api/auth/register', 'POST', {'name': owner, 'password': 'test plan switch password'})
+        service.core.ensure_admin('plan-switch-admin', 'test plan switch admin password')
+        service.core.recharge('plan-switch-admin', owner, 10001, idempotency='plan-switch-funding')
+        # The HTTP fixture may run on a developer disk with < 600 GiB free;
+        # seed a valid existing eight-card instance, then exercise the API.
+        ident = service.core.order(owner, {'gpu_count': 8}, 'eight-to-four')['id']
+        path = f'/api/rental/instances/{ident}/gpu-plan'
+        self.assertEqual(self.request(path, 'POST', {'gpuCount': 8})[0], 200)
+        self.assertEqual(self.request(path, 'POST', {'gpuCount': 4})[0], 200)
+        self.assertEqual(self.request(path, 'POST', {'gpuCount': 8})[0], 409)
+        self.assertEqual(self.request(path, 'POST', {'gpuCount': True})[0], 409)
+        self.assertEqual(self.request(path, 'POST', {'gpuCount': 1, 'dataDiskGiB': 0})[0], 409)
+        _, state = self.request('/api/rental/state')
+        item = next(row for row in state['instances'] if row['id'] == str(ident))
+        self.assertEqual((item['gpuCount'], item['vcpu'], item['memoryGB']), (4, 64, 250))
+        self.assertEqual((item['dataDiskGiB'], item['billableDataDiskGiB'], item['giftDataDiskGiB']),
+                         (600, 0, 600))
+        self.assertTrue(item['eightCardGiftDisk'])
+        self.assertEqual(item['rateCentsPerHour'], service.core.price() * 4)
+        other = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        self.request('/api/auth/register', 'POST', {'name': 'other-plan-http', 'password': 'test other password'}, client=other)
+        self.assertEqual(self.request(path, 'POST', {'gpuCount': 1}, client=other)[0], 401)
+
+    def test_four_gpu_public_api_full_lifecycle(self):
+        service = server.SERVICE
+        old_price = service.core.price()
+        def restore_fixture_price():
+            with service.core._transaction() as con:
+                con.execute("UPDATE settings SET value=? WHERE key='rate_cents_per_hour'", (str(old_price),))
+        self.addCleanup(restore_fixture_price)
+        owner = 'four-plan-http'
+        self.request('/api/auth/register','POST',{'name':owner,'password':'test four gpu password'})
+        service.core.ensure_admin('four-plan-admin','test four gpu admin password')
+        service.core.recharge('four-plan-admin',owner,10000,idempotency='four-http-funding')
+        service.core.set_price('four-plan-admin',400)
+        status,body=self.request('/api/rental/order','POST',{'name':'four-card-vm','gpuCount':4,'vcpu':64,'memoryGB':250})
+        self.assertEqual(status,202)
+        ident=body['instance']['id']
+        self.assertEqual(service.core.list_instances(owner)[0]['gpu_count'],4)
+        self.assertEqual(self.request('/api/rental/order','POST',{'gpuCount':4,'vcpu':16})[0],409)
+        self.assertEqual(self.request('/api/rental/order','POST',{'gpuCount':True})[0],409)
+        self.assertEqual(self.request(f'/api/rental/instances/{ident}/start','POST',{})[0],202)
+        self.wait_for(lambda: service.core.list_instances(owner)[0]['state']=='running')
+        status,body=self.request('/api/rental/state')
+        row=next(x for x in body['instances'] if int(x['id'])==ident)
+        self.assertEqual((row['gpuCount'],row['vcpu'],row['memoryGB'],row['rateCentsPerHour']),(4,64,250,1600))
+        self.assertEqual(len(row['slots']),4)
+        self.assertEqual(sum(x['instanceId']==str(ident) for x in body['slots']),4)
+        self.assertEqual(body['billing']['gpuPlans'][1]['rateCentsPerHour'],1600)
+        self.request(f'/api/rental/instances/{ident}/stop','POST',{})
+        self.wait_for(lambda: service.core.list_instances(owner)[0]['state']=='stopped')
+        self.request(f'/api/rental/instances/{ident}/start','POST',{'mode':'headless'})
+        self.wait_for(lambda: service.core.list_instances(owner)[0]['state']=='running')
+        _,body=self.request('/api/rental/state')
+        row=next(x for x in body['instances'] if int(x['id'])==ident)
+        self.assertEqual((row['gpuCount'],row['vcpu'],row['memoryGB'],row['rateCentsPerHour'],row['slots']),(4,2,4,8,[]))
+        self.request(f'/api/rental/instances/{ident}/delete','POST',{})
+        self.wait_for(lambda: not service.core.list_instances(owner))
+        self.assertNotIn(str(ident),service.secrets)
+
     def request(self, path, method="GET", payload=None, client=None, headers=None):
         data = json.dumps(payload).encode() if payload is not None else None
         request_headers = {"Content-Type": "application/json"}
@@ -150,7 +232,86 @@ class ServerHttpTests(unittest.TestCase):
         self.assertEqual(body["result"]["balanceCents"], 1000)
         status, body = self.request("/api/admin/ledger?refresh=1", client=admin)
         self.assertEqual(status, 200)
+        self.assertEqual(body["scopeOwner"], "")
         self.assertEqual(body["entries"][0]["owner"], "customer1")
+        status, body = self.request("/api/admin/nodes", client=admin)
+        self.assertEqual(status, 200)
+        self.assertEqual(body['nodes'][0]['id'], 'G2-002')
+        self.assertEqual(body['nodes'][0]['telemetry']['status'], 'partial')
+
+    def test_admin_ledger_exact_owner_before_limit(self):
+        core = server.SERVICE.core
+        password = "ledger-test-only-password"
+        core.ensure_admin("ledgeradmin", password)
+        core.register("ledger-target", password)
+        core.register("ledger-target-extra", password)
+        core.recharge("ledgeradmin", "ledger-target", 123, idempotency="ledger-target-1")
+        core.recharge("ledgeradmin", "ledger-target", 456, idempotency="ledger-target-2")
+        # More than 200 newer entries for another, similarly named customer.
+        for index in range(205):
+            core.recharge("ledgeradmin", "ledger-target-extra", 1, idempotency=f"ledger-other-{index}")
+        admin = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+        status, _ = self.request(
+            "/api/auth/login", "POST", {"name": "ledgeradmin", "password": password}, client=admin,
+        )
+        self.assertEqual(status, 200)
+
+        status, body = self.request("/api/admin/ledger?owner=ledger-target", client=admin)
+        self.assertEqual(status, 200)
+        self.assertEqual(body["scopeOwner"], "ledger-target")
+        self.assertEqual([row["owner"] for row in body["entries"]], ["ledger-target"] * 2)
+        self.assertEqual([row["cents"] for row in body["entries"]], [456, 123])
+        for suffix in ("", "?refresh=1", "?owner="):
+            with self.subTest(default_query=suffix):
+                status, body = self.request("/api/admin/ledger" + suffix, client=admin)
+                self.assertEqual(status, 200)
+                self.assertEqual(body["scopeOwner"], "")
+                self.assertEqual(len(body["entries"]), 200)
+                self.assertEqual({row["owner"] for row in body["entries"]}, {"ledger-target-extra"})
+        for owner in ("ledger", "LEDGER-TARGET", "missing-ledger-customer"):
+            with self.subTest(exact_owner=owner):
+                status, body = self.request(f"/api/admin/ledger?owner={owner}", client=admin)
+                self.assertEqual(status, 200)
+                self.assertEqual(body["scopeOwner"], owner)
+                self.assertEqual(body["entries"], [])
+        status, body = self.request("/api/rental/ledger?owner=ledger-target", client=admin)
+        self.assertEqual(status, 200)
+        self.assertNotIn("scopeOwner", body)
+        self.assertEqual(body["entries"], [])  # Customer endpoint still scopes to the logged-in admin.
+
+    def test_ledger_owner_query_cannot_bypass_identity_or_admin_role(self):
+        core = server.SERVICE.core
+        password = "ledger-test-only-password"
+        core.ensure_admin("ledger-guard-admin", password)
+        core.register("ledger-guard-user", password)
+        core.register("ledger-guard-other", password)
+        core.recharge("ledger-guard-admin", "ledger-guard-user", 111, idempotency="ledger-guard-own")
+        core.recharge("ledger-guard-admin", "ledger-guard-other", 222, idempotency="ledger-guard-other")
+        for suffix in ("", "?owner=ledger-guard-other"):
+            with self.subTest(anonymous_query=suffix):
+                status, body = self.request("/api/admin/ledger" + suffix)
+                self.assertEqual(status, 401)
+                self.assertEqual(body["error"], "unauthorized")
+                self.assertNotIn("entries", body)
+                self.assertNotIn("scopeOwner", body)
+        status, _ = self.request(
+            "/api/auth/login", "POST", {"name": "ledger-guard-user", "password": password},
+        )
+        self.assertEqual(status, 200)
+        for suffix in ("", "?owner=", "?owner=ledger-guard-user", "?owner=ledger-guard-other", "?owner=ledger-guard-admin"):
+            with self.subTest(customer_admin_query=suffix):
+                status, body = self.request("/api/admin/ledger" + suffix)
+                self.assertEqual(status, 401)
+                self.assertEqual(body["error"], "unauthorized")
+                self.assertNotIn("entries", body)
+                self.assertNotIn("scopeOwner", body)
+        for suffix in ("", "?owner=ledger-guard-other", "?owner=ledger-guard-other&all_customers=1"):
+            with self.subTest(customer_query=suffix):
+                status, body = self.request("/api/rental/ledger" + suffix)
+                self.assertEqual(status, 200)
+                self.assertNotIn("scopeOwner", body)
+                self.assertEqual([row["owner"] for row in body["entries"]], ["ledger-guard-user"])
+                self.assertEqual([row["cents"] for row in body["entries"]], [111])
 
     def test_state_requires_login(self):
         status, body = self.request("/api/rental/state", client=urllib.request.build_opener())

@@ -107,7 +107,9 @@ class NodeTests(unittest.TestCase):
                 return self.state(instance) in ('off','absent')
         self.backend = NodeSimulation()
         self.forwarders = {n:Mock() for n in range(1,25)}
-        self.node = NodeAgent(self.config,self.backend,self.forwarders)
+        self.telemetry = Mock()
+        self.telemetry.snapshot.return_value = {'status':'live','observedAt':'2026-09-22T08:00:00+00:00'}
+        self.node = NodeAgent(self.config,self.backend,self.forwarders,self.telemetry)
         self.instance = dict(id='901',node_id='G2-003',generation=1,slot=1,endpoint=1,mode='gpu',vcpu=16,memory_mb=62500,data_disk=0)
 
     def tearDown(self): self.temp.cleanup()
@@ -148,6 +150,11 @@ class NodeTests(unittest.TestCase):
         self.assertEqual(self.backend.state(self.instance),'running')
         restarted.dispatch({'node_id':'G2-003','method':'healthy','instance':self.instance})
         self.assertTrue(restarted.heartbeat([self.instance])['instances']['901']['sshReady'])
+
+    def test_heartbeat_exposes_bounded_host_telemetry(self):
+        result = self.node.heartbeat([])
+        self.assertEqual(result['telemetry'], self.telemetry.snapshot.return_value)
+        self.telemetry.snapshot.assert_called_once_with()
 
     def test_duplicate_slot_on_node_rejected(self):
         self.boot()

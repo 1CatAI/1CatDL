@@ -89,6 +89,59 @@ class CoreTests(unittest.TestCase):
             with self.subTest(spec=spec), self.assertRaises(ValueError):
                 self.core.order("alice", spec, repr(spec))
 
+    def test_operator_memory_override_survives_headless_round_trip(self):
+        vm = self.core.order("alice", {"cpu": 16, "ram": 62500}, "custom-memory")
+        with self.assertRaises(PermissionError):
+            self.core.set_gpu_memory_override("alice", vm["id"], 120000, expected_mb=62500)
+        with self.assertRaisesRegex(ValueError, "changed"):
+            self.core.set_gpu_memory_override("test-operator", vm["id"], 120000, expected_mb=64000)
+        resized = self.core.set_gpu_memory_override("test-operator", vm["id"], 120000, expected_mb=62500)
+        self.assertEqual(resized["ram"], 120000)
+        self.assertEqual(self.core.action("alice", vm["id"], "start")["ram"], 120000)
+        self.assertEqual(self.core.metrics()["used"]["memoryMB"], 120000)
+        with self.assertRaisesRegex(ValueError, "fully stopped"):
+            self.core.set_gpu_memory_override("test-operator", vm["id"], 125000, expected_mb=120000)
+        self.core.mark_running(vm["id"])
+        self.core.action("alice", vm["id"], "stop")
+        self.core.mark_off(vm["id"])
+        self.assertEqual(self.core.action("alice", vm["id"], "start", mode="headless")["ram"], 4000)
+        self.core.mark_running(vm["id"])
+        self.core.action("alice", vm["id"], "stop")
+        self.core.mark_off(vm["id"])
+        self.assertEqual(self.core.action("alice", vm["id"], "start", mode="gpu")["ram"], 120000)
+        reopened = Core(Path(self.tmp.name))
+        self.assertEqual(reopened.list_instances("alice")[0]["ram"], 120000)
+        self.assertEqual(reopened.rate_for_mode("gpu", 1), self.core.rate_for_mode("gpu", 1))
+
+    def test_operator_memory_override_respects_host_budget(self):
+        core = Core(Path(self.tmp.name) / "limited-override", memory_budget=170000)
+        core.ensure_admin("test-operator", "correct horse battery staple")
+        for owner in ("alice", "bob"):
+            core.register(owner, "correct horse battery staple")
+            core.recharge("test-operator", owner, 2000, idempotency=f"override-credit:{owner}")
+        reserved = core.order("bob", {"cpu": 16, "ram": 62500}, "reserved")
+        core.action("bob", reserved["id"], "start")
+        target = core.order("alice", {"cpu": 16, "ram": 62500}, "target")
+        with self.assertRaisesRegex(RuntimeError, "memory capacity"):
+            core.set_gpu_memory_override("test-operator", target["id"], 120000, expected_mb=62500)
+        self.assertEqual(core.list_instances("alice")[0]["ram"], 62500)
+
+    def test_existing_database_adds_memory_override_column_without_changing_instances(self):
+        vm = self.core.order("alice", {"cpu": 16, "ram": 62500}, "old-schema")
+        con = sqlite3.connect(self.core.db_path)
+        try:
+            con.execute("ALTER TABLE instances DROP COLUMN gpu_memory_override_mb")
+        finally:
+            con.close()
+        reopened = Core(Path(self.tmp.name))
+        self.assertEqual(reopened.list_instances("alice")[0]["id"], vm["id"])
+        self.assertEqual(reopened.list_instances("alice")[0]["ram"], 62500)
+        con = sqlite3.connect(reopened.db_path)
+        try:
+            self.assertIn("gpu_memory_override_mb", {row[1] for row in con.execute("PRAGMA table_info(instances)")})
+        finally:
+            con.close()
+
     def test_memory_budget_blocks_eighth_fixed_instance_when_reserved(self):
         core = Core(Path(self.tmp.name) / "limited", memory_budget=7 * 62500)
         core.ensure_admin("test-operator", "correct horse battery staple")

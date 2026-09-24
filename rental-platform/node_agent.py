@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from backend import LibvirtBackend, command
+from gpu_plans import gpu_count, instance_slots
+from host_metrics import HostMetrics
 
 SOCKET = '/run/1cat-node/agent.sock'
 MAX_MESSAGE = 131072
@@ -47,17 +49,20 @@ class IsolatedNodeBackend(LibvirtBackend):
 
 
 class NodeAgent:
-    def __init__(self, config, backend=None, forwarders=None):
+    def __init__(self, config, backend=None, forwarders=None, telemetry=None):
         self.config = config
         self.backend = backend or IsolatedNodeBackend(config['control_root'], config)
         self.directory = Path(config['state_root'])
         self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.path = self.directory / 'reservations.json'
         self.records = json.loads(self.path.read_text()) if self.path.exists() else {}
+        for record in self.records.values():
+            record['instance'].setdefault('gpu_count', 1)
         self.lock = threading.RLock()
         self.instance_locks = {}
         self.forwarders = forwarders or {}
         self.forwarder_owners = {}
+        self.telemetry = telemetry or HostMetrics()
 
     def save(self):
         # Call under lock. The directory and temp are root-only; no password is stored.
@@ -72,19 +77,28 @@ class NodeAgent:
     def validate(self, instance):
         if not isinstance(instance, dict) or instance.get('node_id') != self.config['node_id']:
             raise ValueError('wrong node')
-        if set(instance) != {'id','node_id','generation','slot','endpoint','mode','vcpu','memory_mb','data_disk'}:
+        instance = {"gpu_count": 1, **instance}
+        count = gpu_count(instance['gpu_count'])
+        fields = {'id','node_id','generation','slot','endpoint','mode','vcpu','memory_mb','data_disk','gpu_count'}
+        if set(instance) not in (fields, fields | {'eight_card_gift_disk'}):
             raise ValueError('invalid instance fields')
         if not isinstance(instance['id'], str) or not re.fullmatch(r'[1-9][0-9]{0,11}', instance['id']):
             raise ValueError('invalid instance id')
         for key in ('generation','vcpu','memory_mb','data_disk'):
             if type(instance[key]) is not int:
                 raise ValueError('invalid integer')
-        if instance['generation'] < 0 or not 0 <= instance['data_disk'] <= 200:
+        retained_gift = instance.get('eight_card_gift_disk', False)
+        if 'eight_card_gift_disk' in instance and (retained_gift is not True or count == 8):
+            raise ValueError('invalid retained gift disk marker')
+        valid_disk = instance['data_disk'] == 600 if count == 8 or retained_gift else 0 <= instance['data_disk'] <= 200
+        if instance['generation'] < 0 or not valid_disk:
             raise ValueError('invalid generation or disk')
         mode = instance['mode']
-        if mode not in ('gpu', 'headless') or (instance['vcpu'],instance['memory_mb']) != ((16,62500) if mode == 'gpu' else (2,4000)):
+        gpu_memory = 480000 if count == 8 else 62500 * count
+        if mode not in ('gpu', 'headless') or (instance['vcpu'],instance['memory_mb']) != ((16*count,gpu_memory) if mode == 'gpu' else (2,4000)):
             raise ValueError('invalid fixed resources')
         slot, endpoint = instance['slot'], instance['endpoint']
+        instance_slots(instance)
         # Unallocated, never-started instances can be safely deleted.
         if endpoint is None:
             if slot is not None:
@@ -94,6 +108,7 @@ class NodeAgent:
         return dict(instance)
 
     def reserve(self, instance):
+        instance = self.validate(instance)
         ident = instance['id']
         with self.lock:
             previous = self.records.get(ident)
@@ -110,7 +125,7 @@ class NodeAgent:
                 if self.backend.state(old) not in ('off','absent') or (previous.get('held') and not self.backend.recovered(old)):
                     raise RuntimeError('previous generation not recovered')
             held = [record['instance'] for key,record in self.records.items() if key != ident and record.get('held')]
-            if any(item['endpoint'] == instance['endpoint'] or (instance['slot'] and item['slot'] == instance['slot']) for item in held):
+            if any(item['endpoint'] == instance['endpoint'] or set(instance_slots(item)).intersection(instance_slots(instance)) for item in held):
                 raise RuntimeError('node resource already reserved')
             if sum(item['vcpu'] for item in held) + instance['vcpu'] > self.config.get('cpu_budget',128) or sum(item['memory_mb'] for item in held) + instance['memory_mb'] > self.config.get('memory_budget',500000):
                 raise RuntimeError('node capacity unavailable')
@@ -121,6 +136,7 @@ class NodeAgent:
             return record
 
     def matching(self, instance, allow_missing=False):
+        instance = self.validate(instance)
         with self.lock:
             record = self.records.get(instance['id'])
             if not record:
@@ -268,10 +284,15 @@ class NodeAgent:
             self.save()
         usage = shutil.disk_usage(self.config['data_root'])
         gib = 1024**3
+        try:
+            telemetry = self.telemetry.snapshot()
+        except Exception:
+            telemetry = {'status':'partial','observedAt':stamp(),'error':'host telemetry unavailable'}
         return {'nodeId':self.config['node_id'], 'ready':self.backend.ready(), 'observedAt':stamp(),
                 'instances':results, 'storage':{'totalGiB':round(usage.total/gib,1), 'freeGiB':round(usage.free/gib,1),
                 'usedGiB':round(usage.used/gib,1),'safetyGiB':self.config.get('safety_gib',128),
-                'lowSpace':usage.free < self.config.get('safety_gib',128)*gib,'mode':'共享模板 · 稀疏增量盘'}}
+                'lowSpace':usage.free < self.config.get('safety_gib',128)*gib,'mode':'共享模板 · 稀疏增量盘'},
+                'telemetry':telemetry}
 
     def expire_once(self):
         with self.lock:
@@ -291,11 +312,11 @@ class NodeAgent:
                 instance = record['instance']
                 self.clear(instance)
                 state = self.backend.state(instance)
-                if state == 'running':
+                if state in ('running', 'stopping'):
                     if not record.get('shutdown_requested'):
                         record['shutdown_requested'] = time.time()
                         self.backend.stop(instance)
-                    elif time.time() - record['shutdown_requested'] >= 20:
+                    elif time.time() - record['shutdown_requested'] >= (420 if instance.get('gpu_count',1)==8 else 300 if instance.get('gpu_count',1)==4 else 20):
                         self.backend.force_off(instance)
                 elif state in ('off','absent') and self.backend.recovered(instance):
                     with self.lock:
@@ -314,7 +335,7 @@ def client():
     if len(request) > MAX_MESSAGE or not request.endswith(b'\n'):
         raise ValueError('invalid request length')
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(145)
+        connection.settimeout(725)
         connection.connect(SOCKET)
         connection.sendall(request)
         response = connection.makefile('rb').readline(MAX_MESSAGE + 1)
@@ -332,7 +353,7 @@ def serve():
     agent = NodeAgent(config, forwarders=forwarders)
     class Handler(socketserver.StreamRequestHandler):
         def handle(self):
-            self.connection.settimeout(150)
+            self.connection.settimeout(730)
             try:
                 data = self.rfile.readline(MAX_MESSAGE + 1)
                 if len(data)>MAX_MESSAGE or not data.endswith(b'\n'):

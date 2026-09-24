@@ -48,7 +48,7 @@ lock_deployment() {
 }
 
 package_check() {
-  local required=(core.py recharge_codes.py backend.py shared_storage.py remote_backend.py shared-storage/1cat-mount-shared shared-storage/1cat-shared-storage.service server.py adminctl.py deploy-production.sh prepare-image.sh 1cat-rental.service public/index.html public/rental/index.html)
+  local required=(core.py placement.py gpu_plans.py recharge_codes.py backend.py shared_storage.py remote_backend.py host_metrics.py shared-storage/1cat-mount-shared shared-storage/1cat-shared-storage.service server.py adminctl.py deploy-production.sh prepare-image.sh 1cat-rental.service public/index.html public/rental/index.html)
   local item
   for item in "${required[@]}"; do
     [[ -f "$SCRIPT_DIR/$item" ]] || { echo "release file missing: $item" >&2; return 1; }
@@ -174,6 +174,7 @@ displace_program() {
 
 guard_account_rollback() {
   local backup=$1
+  guard_gpu_plan_rollback "$backup" || return
   guard_multinode_rollback "$backup" || return
   if grep -q 'def delete_customer(' "$backup/program/core.py" 2>/dev/null; then return 0; fi
   if grep -q 'def delete_customer(' "$ROOT/core.py" "$SCRIPT_DIR/core.py" 2>/dev/null &&
@@ -186,6 +187,52 @@ sys.exit(1 if 'deleted_at' in columns and db.execute('SELECT 1 FROM users WHERE 
 PY
     then
       echo 'deleted customer accounts exist; this backup would re-enable them. Use ui-rollback or an account-deletion-compatible release.' >&2
+      return 1
+    fi
+  fi
+}
+
+guard_gpu_plan_rollback() {
+  local backup=$1
+  if [[ -f "$DATA/state/core.sqlite3" && "$(head -c 16 "$DATA/state/core.sqlite3")" == 'SQLite format 3' ]] &&
+    python3 - "$DATA/state/core.sqlite3" <<'PY'
+import sqlite3,sys
+db=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True)
+columns={r[1] for r in db.execute('PRAGMA table_info(instances)')}
+has_gift='eight_card_gift_disk' in columns and db.execute(
+    "SELECT 1 FROM instances WHERE eight_card_gift_disk=1 AND gpu_count IN (1,4) AND state!='deleted' LIMIT 1").fetchone()
+sys.exit(0 if has_gift else 1)
+PY
+  then
+    if ! grep -Fq 'eight_card_gift_disk' "$backup/program/core.py" 2>/dev/null ||
+       ! grep -Fq 'eight_card_gift_disk' "$backup/program/server.py" 2>/dev/null; then
+      echo 'downgraded eight-card gifted disks exist; backup controller would omit the 600 GiB disk. Use ui-rollback or a compatible release.' >&2
+      return 1
+    fi
+  fi
+  if [[ -f "$backup/program/gpu_plans.py" ]] && grep -Fq 'value not in (1, 4, 8)' "$backup/program/gpu_plans.py"; then return 0; fi
+  if [[ -f "$backup/program/gpu_plans.py" && -f "$DATA/state/core.sqlite3" && "$(head -c 16 "$DATA/state/core.sqlite3")" == 'SQLite format 3' ]]; then
+    if ! python3 - "$DATA/state/core.sqlite3" <<'PY'
+import sqlite3,sys
+db=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True)
+columns={r[1] for r in db.execute('PRAGMA table_info(instances)')}
+sys.exit(1 if 'gpu_count' in columns and db.execute("SELECT 1 FROM instances WHERE gpu_count=8 AND state!='deleted' LIMIT 1").fetchone() else 0)
+PY
+    then
+      echo 'eight-card instances exist; backup code cannot safely schedule or meter them. Use ui-rollback or an eight-card-compatible release.' >&2
+      return 1
+    fi
+  fi
+  if [[ -f "$backup/program/gpu_plans.py" ]]; then return 0; fi
+  if [[ -f "$DATA/state/core.sqlite3" && -f "$ROOT/gpu_plans.py" ]]; then
+    if ! python3 - "$DATA/state/core.sqlite3" <<'PY'
+import sqlite3,sys
+db=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True)
+columns={r[1] for r in db.execute('PRAGMA table_info(instances)')}
+sys.exit(1 if 'gpu_count' in columns and db.execute("SELECT 1 FROM instances WHERE gpu_count=4 AND state!='deleted' LIMIT 1").fetchone() else 0)
+PY
+    then
+      echo 'four-card instances exist; old code cannot safely schedule or meter them. Use ui-rollback or a four-card-compatible release.' >&2
       return 1
     fi
   fi
