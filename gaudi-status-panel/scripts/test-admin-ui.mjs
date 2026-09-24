@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { readFile } from 'node:fs/promises';
-import { adminDefaults, readAdminRoute, adminSearch, filterAdminInstances, moneyToCents, isAttention, currentRequestIdentity, resetRequestIdentity, notifyUnauthorized } from '../components/rental/admin-model.ts';
+import { adminDefaults, readAdminRoute, adminSearch, filterAdminInstances, moneyToCents, gpuInstanceQuotaReason, isAttention, currentRequestIdentity, resetRequestIdentity, notifyUnauthorized } from '../components/rental/admin-model.ts';
 
 const row = (id, props = {}) => ({ id: String(id), name: 'gaudi-dev', owner: 'alice', nodeId: 'G2-002', state: 'stopped', mode: 'gpu', ...props });
 const rows = [row(1), row(2, { nodeId: 'G2-003', owner: 'alice-extra', state: 'running', mode: 'headless' }), row(3, { nodeId: 'G2-003', state: 'error' }), row(4, { state: 'running' }), row(5, { state: 'starting', nodeOnline: false })];
@@ -21,6 +21,14 @@ test('reset removes stale query keys', () => { const search = adminSearch(adminD
 for (const [input, expected] of [['0.01', 1], ['4', 400], ['6.66', 666], [' 100.10 ', 10010], ['10000', 1000000]]) test(`money exact cents: ${input}`, () => assert.equal(moneyToCents(input), expected));
 for (const input of ['', '0', '-4', '1.001', 'NaN', 'Infinity', '1e3', '01', '10000.01']) test(`reject invalid money: ${input}`, () => assert.equal(moneyToCents(input), null));
 test('manual recharge keeps existing server maximum', () => { assert.equal(moneyToCents('1000000', 100000000), 100000000); assert.equal(moneyToCents('1000000.01', 100000000), null); });
+test('GPU instance quota distinguishes unlimited, zero and exact cap', () => {
+  assert.equal(gpuInstanceQuotaReason(null, 99), '');
+  assert.equal(gpuInstanceQuotaReason(undefined, 99), '');
+  assert.match(gpuInstanceQuotaReason(0, 0), /暂停/);
+  assert.equal(gpuInstanceQuotaReason(2, 1), '');
+  assert.match(gpuInstanceQuotaReason(2, 2), /2\/2/);
+  assert.match(gpuInstanceQuotaReason(1, 2), /2\/1/);
+});
 test('attention recognizes repair required', () => assert(isAttention(row(9, { state: 'repair_required' }))));
 const source = await readFile(new URL('../components/rental/rental-panel.tsx', import.meta.url), 'utf8');
 const admin = await readFile(new URL('../components/rental/admin-workspace.tsx', import.meta.url), 'utf8');
@@ -31,6 +39,12 @@ test('admin login defaults to admin unless explicit customer view', () => assert
 test('codes remain mounted under hidden tab, not conditionally destroyed', () => assert.match(admin, /<div hidden=\{route.finance !== 'codes'\}>\{codes\(/));
 test('refresh and generation guards retained', () => { assert.match(source, /beforeunload/); assert.match(source, /expectedCents/); assert.match(source, /X-Idempotency-Key/); assert.match(admin, /requestKeys.current.get\(intent\)/); });
 test('obsolete stacked admin sections removed', () => { assert.doesNotMatch(source, /function AdminFleet|function AdminPanel|充值 SDK 生成器|rental-admin-customer-list/); });
+test('per-customer GPU quota editor and start guards use server quota', () => {
+  assert.match(source, /expectedLimit: editingCustomer\.gpuInstanceLimit/);
+  assert.match(source, /gpuInstanceQuotaReason\(state\.account\.gpuInstanceLimit, gpuActiveCount\)/);
+  assert.match(admin, /gpuInstanceQuotaReason\(row\.ownerGpuInstanceLimit, occupied\)/);
+  assert.doesNotMatch(source, /请先关闭当前 GPU 实例/);
+});
 test('native dialogs and hidden pages cannot be revived by CSS', () => assert.match(css, /dialog:not\(\[open\]\).*display: none !important/s));
 test('no costly animated effects introduced', () => assert.doesNotMatch(css, /backdrop-filter|filter:\s*blur|transition:\s*all/));
 test('node monitoring uses a bounded five-second admin-only poll', () => {

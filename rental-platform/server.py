@@ -724,6 +724,7 @@ class Service:
                 "computeCents": cost.get('computeCents', 0), "storageCents": row['storage_charged_cents'],
                 "storageCnyPerDay": round(row['data'] * self.core.pricing()['extraDataDiskCnyPerGiBDay'], 5),
                 "owner": row['owner'] if admin_view else None,
+                "ownerGpuInstanceLimit": row.get('owner_gpu_limit') if admin_view else None,
                 "message": message,
                 "sharedStorage": shared,
             })
@@ -997,6 +998,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path == '/api/admin/placement-policy':
                 policy = SERVICE.core.set_placement_policy(owner, body.get('policy'), body.get('expected'))
                 self.json({'policy': policy, 'nodes': list(SERVICE.core.nodes)}); return
+            gpu_limit = re.fullmatch(r'/api/admin/customers/([a-zA-Z0-9][a-zA-Z0-9_-]{2,31})/gpu-limit', path)
+            if gpu_limit:
+                SERVICE.check_mutation()
+                if set(body) != {'limit', 'expectedLimit'}:
+                    raise ValueError('只接受 limit 和 expectedLimit 配置项')
+                result = SERVICE.core.set_customer_gpu_limit(owner, gpu_limit[1], body['limit'], body['expectedLimit'])
+                self.json({'ok': True, 'customer': result}, 200, set_cookie=cookie); return
             customer_action = re.fullmatch(r'/api/admin/customers/([a-zA-Z0-9][a-zA-Z0-9_-]{2,31})/(delete|restore)', path)
             if customer_action:
                 if customer_action[2] == 'delete':

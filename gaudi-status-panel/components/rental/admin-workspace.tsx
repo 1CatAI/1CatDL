@@ -6,7 +6,7 @@ import { AdminNodes } from './admin-nodes';
 import { gpuCapacityReason } from './gpu-plans';
 import { BrandLogo } from '@/components/brand-logo';
 import type { AdminCustomer, HostTelemetry, RentalAccount, RentalInstance, RentalState } from './rental-panel';
-import { adminDefaults, adminRequest, adminRequestKey, adminSearch, filterAdminInstances, formatDate, formatMoney, isAttention, moneyToCents, readAdminRoute, stateLabel, type AdminRoute } from './admin-model';
+import { adminDefaults, adminRequest, adminRequestKey, adminSearch, filterAdminInstances, formatDate, formatMoney, gpuInstanceQuotaReason, isAttention, moneyToCents, readAdminRoute, stateLabel, type AdminRoute } from './admin-model';
 
 export type AdminAccountProps = {
   active: boolean; revision: number; query: string; status: string;
@@ -123,7 +123,9 @@ export function AdminWorkspace({ account, state, active, onRefresh, onLogout, on
     if (row.nodeOnline === false || (node && (!node.online || !node.imageReady))) return '节点或镜像暂不可用';
     if (node?.storage?.lowSpace) return '节点存储不足';
     if (mode === 'headless') return (node?.headlessAvailable ?? resource.headless?.available ?? 0) <= 0 ? '无头资源不足' : '';
-    if (rows.some(other => other.id !== row.id && other.owner === row.owner && other.mode !== 'headless' && ['running', 'creating', 'starting', 'stopping', 'repair_required'].includes(other.state))) return '该客户已有占用 GPU 的实例';
+    const occupied = rows.filter(other => other.owner === row.owner && other.slot > 0).length;
+    const quotaReason = gpuInstanceQuotaReason(row.ownerGpuInstanceLimit, occupied);
+    if (quotaReason) return quotaReason;
     return gpuCapacityReason(resource, row.nodeId, row.gpuCount ?? 1);
   };
   const perform = async () => {
@@ -159,7 +161,7 @@ export function AdminWorkspace({ account, state, active, onRefresh, onLogout, on
       {route.section === 'instances' && <>
         <div className="admin-stats">
           <div className="admin-stat"><span>可用 GPU</span><strong>{fleet ? available : '—'}<small> / {fleet ? resource.slots.length : '—'}</small></strong><small>{nodes.filter(node => node.online).length} / {nodes.length} 节点在线</small></div>
-          <div className="admin-stat"><span>GPU 运行</span><strong>{fleet ? running.filter(row => row.mode !== 'headless').length : '—'}<small> 台</small></strong><small>每位客户最多 1 台</small></div>
+          <div className="admin-stat"><span>GPU 运行</span><strong>{fleet ? running.filter(row => row.mode !== 'headless').length : '—'}<small> 台</small></strong><small>按客户配额与节点资源调度</small></div>
           <div className="admin-stat"><span>无头运行</span><strong>{fleet ? running.filter(row => row.mode === 'headless').length : '—'}<small> 台</small></strong><small>独立环境，不占显卡</small></div>
           <button className={`admin-stat ${attention ? 'is-warning' : ''}`} onClick={() => navigate({ status: 'attention', node: 'all', mode: 'all', owner: '', q: '' })}><span>需要关注</span><strong>{fleet ? attention : '—'}<small> 台</small></strong><small>异常或节点离线 · 点击查看</small></button>
         </div>

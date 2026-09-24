@@ -214,12 +214,13 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(self.core.mark_recovered(vm["id"])["state"], "running")
         self.assertEqual(self.core.metrics()["open_usage_intervals"], 1)
 
-    def test_each_customer_has_one_running_instance(self):
+    def test_default_customer_can_start_multiple_gpu_instances(self):
         first = self.core.order("alice", {"cpu": 16, "ram": 62500}, "first")
         second = self.core.order("alice", {"cpu": 16, "ram": 62500}, "second")
         self.core.action("alice", first["id"], "start")
-        with self.assertRaisesRegex(RuntimeError, "one GPU instance"):
-            self.core.action("alice", second["id"], "start")
+        self.core.action("alice", second["id"], "start")
+        self.assertIsNone(self.core.profile("alice")["gpuInstanceLimit"])
+        self.assertEqual(self.core.profile("alice")["gpuActiveCount"], 2)
 
     def test_admin_recharge_and_balance_metering(self):
         core = Core(Path(self.tmp.name) / "billing", rate_cents_per_hour=3600)

@@ -437,6 +437,24 @@
   overflow-wrap: anywhere;
 }
 .admin-app .admin-row-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 132px; }
+.admin-app .admin-quota-count { display: block; font-weight: 600; white-space: nowrap; }
+.admin-app .admin-quota-editor-row > td { padding: 0 14px 14px !important; background: var(--admin-soft); }
+.admin-app .admin-quota-editor {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  padding: 14px;
+  border: 1px solid var(--admin-border);
+  border-radius: var(--admin-radius);
+  background: var(--admin-surface);
+}
+.admin-app .admin-quota-editor > div:first-child { flex: 1 1 260px; min-width: 0; }
+.admin-app .admin-quota-editor p { margin-top: 4px; color: var(--admin-muted); font-size: 13px; line-height: 1.5; }
+.admin-app .admin-quota-options,
+.admin-app .admin-quota-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.admin-app .admin-quota-options label { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; white-space: nowrap; }
+.admin-app .admin-quota-options input[type="number"] { width: 72px; min-height: 34px; padding: 4px 8px; border: 1px solid var(--admin-control-border); border-radius: 6px; }
 .admin-app .admin-instance-table td:nth-child(2) { min-width: 112px; }
 .admin-app .admin-instance-table td:last-child { min-width: 200px; }
 .admin-app .admin-instance-table .admin-row-actions { flex-wrap: nowrap; }
