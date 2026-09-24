@@ -7,6 +7,10 @@ export type AdminRoute = {
   owner: string; customer: string; accounts: string; finance: string;
 };
 export const adminDefaults: AdminRoute = { section: 'instances', q: '', node: 'all', status: 'all', mode: 'all', owner: '', customer: '', accounts: 'active', finance: 'ledger' };
+export function gpuInstanceQuotaReason(limit: number | null | undefined, occupied: number): string {
+  if (limit == null || occupied < limit) return '';
+  return limit === 0 ? '管理员已暂停此账户的 GPU 开机权限' : `GPU 实例并发配额已满（${occupied}/${limit}）`;
+}
 export function readAdminRoute(search: string): AdminRoute {
   const params = new URLSearchParams(search);
   const route = { ...adminDefaults };

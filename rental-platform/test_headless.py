@@ -27,7 +27,7 @@ class HeadlessCoreTests(unittest.TestCase):
     def order(self, key, mode='headless'):
         return self.core.order('alice', {'mode': mode}, key)
 
-    def test_multiple_headless_and_one_gpu_coexist(self):
+    def test_multiple_headless_and_gpu_instances_coexist(self):
         a, b, gpu = self.order('a'), self.order('b'), self.order('gpu', 'gpu')
         for row in (a, b, gpu):
             self.core.action('alice', row['id'], 'start')
@@ -41,8 +41,8 @@ class HeadlessCoreTests(unittest.TestCase):
         self.assertEqual(self.core.metrics()['active_slots'], 1)
         self.assertEqual(self.core.metrics()['active_headless'], 2)
         extra = self.order('gpu2', 'gpu')
-        with self.assertRaisesRegex(RuntimeError, 'one GPU'):
-            self.core.action('alice', extra['id'], 'start')
+        self.core.action('alice', extra['id'], 'start')
+        self.assertEqual(self.core.metrics()['active_slots'], 2)
 
     def test_fixed_specs_and_mode_validation(self):
         for spec in ({'mode': 'other'}, {'mode': 'headless', 'cpu': 16}, {'mode': 'headless', 'ram': 4096}, {'mode': 'headless', 'gpu': 'Gaudi2'}):

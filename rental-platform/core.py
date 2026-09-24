@@ -229,6 +229,9 @@ class Core(RechargeCodeMixin):
             self._ensure_column(con, "users", "last_activity_at", "TEXT")
             self._ensure_column(con, "users", "deleted_at", "TEXT")
             self._ensure_column(con, "users", "deleted_by", "TEXT")
+            # NULL means no per-customer GPU concurrency limit, including for
+            # customers created before this column was introduced.
+            self._ensure_column(con, "users", "gpu_instance_limit", "INTEGER CHECK(gpu_instance_limit BETWEEN 0 AND 10000)")
             self._ensure_column(con, "instances", "last_activity_at", "TEXT")
             self._ensure_column(con, "instances", "storage_started_at", "TEXT")
             self._ensure_column(con, "instances", "storage_metered_microcents", "INTEGER NOT NULL DEFAULT 0")
@@ -514,7 +517,9 @@ class Core(RechargeCodeMixin):
         owner = self._owner(owner)
         with self._connection() as con:
             row = con.execute(
-                "SELECT name, role, balance_cents, created_at, last_activity_at FROM users WHERE name=? AND deleted_at IS NULL",
+                "SELECT name, role, balance_cents, created_at, last_activity_at, gpu_instance_limit, "
+                "(SELECT COUNT(*) FROM instances WHERE owner=users.name AND slot IS NOT NULL) AS gpu_active_count "
+                "FROM users WHERE name=? AND deleted_at IS NULL",
                 (owner,),
             ).fetchone()
         if row is None:
@@ -525,6 +530,8 @@ class Core(RechargeCodeMixin):
             "balanceCents": row["balance_cents"],
             "createdAt": row["created_at"],
             "lastActivityAt": row["last_activity_at"],
+            "gpuInstanceLimit": row["gpu_instance_limit"],
+            "gpuActiveCount": row["gpu_active_count"],
         }
 
     def is_admin(self, owner: str) -> bool:
@@ -572,10 +579,38 @@ class Core(RechargeCodeMixin):
             return [dict(row) for row in con.execute(
                 "SELECT u.name, u.balance_cents AS balanceCents, u.created_at AS createdAt, "
                 "u.deleted_at AS deletedAt, u.deleted_by AS deletedBy, "
+                "u.gpu_instance_limit AS gpuInstanceLimit, "
+                "(SELECT COUNT(*) FROM instances i WHERE i.owner=u.name AND i.slot IS NOT NULL) AS gpuActiveCount, "
                 "(SELECT COUNT(*) FROM instances i WHERE i.owner=u.name AND "
                 "(i.state!='deleted' OR i.slot IS NOT NULL OR i.endpoint IS NOT NULL OR i.desired_action IS NOT NULL)) AS instanceCount "
                 "FROM users u WHERE u.role='customer' AND " + filters[status] + " ORDER BY u.created_at DESC LIMIT 500"
             )]
+
+    def set_customer_gpu_limit(self, admin: str, customer: str, limit: int | None, expected_limit: int | None) -> dict[str, Any]:
+        if not self.is_admin(admin):
+            raise PermissionError("admin required")
+        customer = self._owner(customer)
+        for value in (limit, expected_limit):
+            if value is not None and (type(value) is not int or not 0 <= value <= 10000):
+                raise ValueError("GPU 并发上限须为 0–10000 的整数，或不限制")
+        with self._transaction() as con:
+            row = con.execute(
+                "SELECT gpu_instance_limit FROM users WHERE name=? AND role='customer' AND deleted_at IS NULL",
+                (customer,),
+            ).fetchone()
+            if row is None:
+                raise KeyError("customer not found")
+            previous = row["gpu_instance_limit"]
+            if previous != expected_limit:
+                raise RuntimeError("GPU 配额已被其他管理员修改，请刷新后重试")
+            if previous != limit:
+                con.execute("UPDATE users SET gpu_instance_limit=? WHERE name=?", (limit, customer))
+                self._audit(con, admin, "customer_gpu_limit_changed", customer,
+                            {"previousLimit": previous, "newLimit": limit})
+            occupied = con.execute(
+                "SELECT COUNT(*) FROM instances WHERE owner=? AND slot IS NOT NULL", (customer,)
+            ).fetchone()[0]
+        return {"name": customer, "gpuInstanceLimit": limit, "gpuActiveCount": occupied}
 
     def delete_customer(self, admin: str, customer: str, confirmation: str) -> dict[str, Any]:
         """Revoke access, not financial history. Never delete VM disks implicitly."""
@@ -839,7 +874,10 @@ class Core(RechargeCodeMixin):
         if not self.is_admin(admin):
             raise PermissionError("admin required")
         with self._connection() as con:
-            return [self._public(r) for r in con.execute("SELECT * FROM instances WHERE state!='deleted' ORDER BY id DESC")]
+            return [{**self._public(r), "owner_gpu_limit": r["owner_gpu_limit"]} for r in con.execute(
+                "SELECT i.*, u.gpu_instance_limit AS owner_gpu_limit FROM instances i "
+                "JOIN users u ON u.name=i.owner WHERE i.state!='deleted' ORDER BY i.id DESC"
+            )]
 
     def admin_action(self, admin, instance_id, verb, mode=None):
         if not self.is_admin(admin):
@@ -1108,11 +1146,14 @@ class Core(RechargeCodeMixin):
                     balance = con.execute("SELECT balance_cents FROM users WHERE name=?", (owner,)).fetchone()[0]
                     if balance <= 0:
                         raise RuntimeError("balance is zero; recharge before starting")
-                if selected_mode == "gpu" and con.execute(
-                    "SELECT 1 FROM instances WHERE owner=? AND slot IS NOT NULL",
-                    (owner,),
-                ).fetchone():
-                    raise RuntimeError("each customer may run only one GPU instance")
+                if selected_mode == "gpu":
+                    limit = con.execute("SELECT gpu_instance_limit FROM users WHERE name=?", (owner,)).fetchone()[0]
+                    if limit is not None:
+                        occupied = con.execute(
+                            "SELECT COUNT(*) FROM instances WHERE owner=? AND slot IS NOT NULL", (owner,)
+                        ).fetchone()[0]
+                        if occupied >= limit:
+                            raise RuntimeError(f"GPU 实例并发配额已满（{occupied}/{limit}）")
                 override = row['gpu_memory_override_mb']
                 if override is not None and (row['gpu_count'] != 1 or not FIXED_MEMORY_MB <= override <= MAX_SINGLE_GPU_MEMORY_MB):
                     raise RuntimeError("invalid GPU memory override")
@@ -1224,7 +1265,7 @@ class Core(RechargeCodeMixin):
                 (now, instance_id),
             )
             con.execute(
-                "UPDATE instances SET slot=NULL, endpoint=NULL, state=?, desired_action=NULL, updated_at=?, last_activity_at=? WHERE id=?",
+                "UPDATE instances SET slot=NULL, endpoint=NULL, state=?, desired_action=NULL, error=NULL, updated_at=?, last_activity_at=? WHERE id=?",
                 (new_state, now, now, instance_id),
             )
             result = con.execute("SELECT * FROM instances WHERE id=?", (instance_id,)).fetchone()
