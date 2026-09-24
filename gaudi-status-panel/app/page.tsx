@@ -1,6 +1,7 @@
 'use client';
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { withRequestTimeout } from '../lib/request-timeout.mjs';
 import {
   Area,
   AreaChart,
@@ -806,12 +807,11 @@ export default function Home() {
   const fetchStatus = useCallback(async (showSpinner = false) => {
     if (showSpinner) setRefreshing(true);
     try {
-      const response = await fetch('/api/status', {
-        cache: 'no-store',
-        signal: AbortSignal.timeout(3500),
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const received = (await response.json()) as DashboardSnapshot;
+      const received = await withRequestTimeout(async signal => {
+        const response = await fetch('/api/status', { cache: 'no-store', signal });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return (await response.json()) as DashboardSnapshot;
+      }, 3500);
       const receivedElectricity = received.electricity;
       const next: DashboardSnapshot = {
         ...received,

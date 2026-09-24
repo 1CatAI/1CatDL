@@ -33,7 +33,9 @@ class RemoteBackend:
                 self.config['user'] + '@' + self.config['host'], 'node-rpc']
         try:
             result = subprocess.run(args, input=json.dumps(request) + '\n', text=True,
-                                    capture_output=True, timeout=150 if method in ('prepare', 'start', 'release') else 45)
+                                    capture_output=True, timeout=(720 if instance and instance.get('gpu_count',1)==4 else 150)
+                                    if method in ('prepare', 'start', 'release', 'force_off') else
+                                    (90 if instance and instance.get('gpu_count',1)==4 else 45))
             if result.returncode:
                 raise NodeUnavailable('节点通信暂不可用，资源占用将保留')
             response = json.loads(result.stdout)
@@ -88,12 +90,13 @@ class RemoteBackend:
 
 
 class BackendRouter:
-    def __init__(self, local, nodes):
+    def __init__(self, local, nodes, local_node_id=LOCAL_NODE):
         self.local = local
+        self.local_node_id = local_node_id
         self.remotes = {node['id']: RemoteBackend(node) for node in nodes}
 
     def for_node(self, node_id):
-        if node_id == LOCAL_NODE:
+        if self.local is not None and node_id == self.local_node_id:
             return self.local
         if node_id not in self.remotes:
             raise NodeUnavailable('实例所属节点未配置，禁止切换到其他机器')
@@ -113,13 +116,13 @@ class BackendRouter:
         return call
 
 
-def load_nodes(path):
+def load_nodes(path, local_node_id=LOCAL_NODE):
     if not path:
         return []
     nodes = json.loads(Path(path).read_text())
     if not isinstance(nodes, list):
         raise ValueError('nodes config must be a list')
-    seen = {LOCAL_NODE}
+    seen = {local_node_id} if local_node_id is not None else set()
     for node in nodes:
         if node['id'] in seen or not isinstance(node.get('enabled'), bool):
             raise ValueError('duplicate or invalid node config')

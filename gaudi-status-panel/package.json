@@ -11,6 +11,8 @@
     "start": "wrangler dev --config dist/server/wrangler.json",
     "export:static": "node scripts/export-static.mjs",
     "lint": "oxlint",
+    "test:admin": "node --test scripts/test-admin-ui.mjs",
+    "test:requests": "node --test scripts/test-request-timeout.mjs",
     "format": "oxfmt"
   },
   "dependencies": {

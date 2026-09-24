@@ -44,6 +44,22 @@ class BackendStorageTests(unittest.TestCase):
             (directory / name).write_bytes(b"qa")
         self.backend.prepare({"id": "2", "data_disk": 0}, "unused-password")
 
+    def test_gift_enlargement_is_not_recreated_or_shrunk_on_prepare(self):
+        instance = {'id': '57', 'data_disk': 200}
+        directory = self.backend.disks / '57'
+        directory.mkdir()
+        for name in ('system.qcow2', 'seed.iso', 'VARS.fd'):
+            (directory / name).write_bytes(b'existing')
+        data = self.backend.data_path(instance)
+        data.mkdir()
+        image = data / 'data.qcow2'
+        original = b'existing enlarged image with customer data'
+        image.write_bytes(original)
+        with patch('backend.command') as commands:
+            self.backend.prepare(instance, 'unused-test-password')
+        self.assertEqual(image.read_bytes(), original)
+        self.assertFalse(any(call.args[0][0] == 'qemu-img' for call in commands.call_args_list))
+
     def test_release_removes_exact_instance_storage(self):
         directory = self.backend.disks / "3"
         directory.mkdir()

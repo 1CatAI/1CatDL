@@ -5,6 +5,7 @@ node_modules/
 dist/
 .wrangler/
 .next/
+.vinext/
 *.tsbuildinfo
 .env
 .env.*
@@ -22,4 +23,3 @@ state/
 backups/
 rental-platform/public/
 gaudi-status-panel/deploy/public/
-

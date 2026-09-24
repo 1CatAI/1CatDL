@@ -25,3 +25,5 @@ jobs:
         working-directory: gaudi-status-panel
       - run: npx tsc --noEmit && npm run lint && npm run build
         working-directory: gaudi-status-panel
+      - run: node --test scripts/test-*.mjs
+        working-directory: gaudi-status-panel

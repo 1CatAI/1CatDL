@@ -356,6 +356,12 @@
 .rental-mode-picker button strong { font-size: 15px; color: #182b49; }
 .rental-mode-picker button span, .rental-mode-picker > small { font-size: 12px; line-height: 1.6; }
 .rental-mode-picker > small { display: block; color: #63718b; margin-top: 12px; }
+.rental-node-picker > div { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.rental-node-picker button:disabled { cursor: not-allowed; opacity: 1; color: #63718b; background: #f5f7fa; border-color: #e1e6ee; box-shadow: none; }
+.rental-node-picker button:disabled strong { color: #778397; }
+.rental-node-picker button span { overflow-wrap: anywhere; }
+.rental-placement-settings .rental-registration-form { padding: 0 18px 16px; }
+.rental-placement-settings .admin-notice { display: block; margin: 0 18px 16px; }
 .rental-headless-capacity { display: flex; gap: 12px; align-items: center; margin: 20px 24px; padding: 16px; border: 1px solid #c5e7e5; border-radius: 12px; color: #177973; background: #f0faf9; }
 .rental-headless-capacity strong, .rental-headless-capacity span { display: block; }
 .rental-headless-capacity span { font-size: 12px; margin-top: 5px; line-height: 1.7; }

@@ -13,6 +13,7 @@ import uuid
 from pathlib import Path
 from xml.etree import ElementTree as ET
 from shared_storage import TAG as SHARED_TAG, load_config as load_shared_config, validate_export, guest_install_script
+from gpu_plans import gpu_count, instance_slots
 
 
 def command(args, timeout=30):
@@ -79,6 +80,13 @@ class LibvirtBackend:
     def virsh(self, *args, timeout=30):
         return command(['virsh', '-c', 'qemu:///system', *map(str, args)], timeout)
 
+    def online(self):
+        try:
+            self.virsh('list', '--all', '--name', timeout=3)
+            return True
+        except (OSError, RuntimeError, subprocess.TimeoutExpired):
+            return False
+
     def ready(self):
         try:
             validate_export(self.shared_config)
@@ -100,7 +108,7 @@ class LibvirtBackend:
             if self.name(instance) not in names:
                 return 'absent'
             value = self.virsh('domstate', self.name(instance)).strip()
-            return {'running': 'running', 'shut off': 'off'}.get(value, 'unknown')
+            return {'running': 'running', 'in shutdown': 'stopping', 'shut off': 'off'}.get(value, 'unknown')
         except (RuntimeError, subprocess.TimeoutExpired):
             return 'unknown'
 
@@ -193,6 +201,11 @@ class LibvirtBackend:
             return
         headless = instance.get('mode') == 'headless'
         slot = None if headless else int(instance['slot'])
+        count = gpu_count(instance.get('gpu_count', 1))
+        if not headless and count == 4 and (instance['vcpu'], instance['memory_mb']) != (64, 250000):
+            raise ValueError('four GPUs require 64 vCPU and 250000 MB')
+        if not headless and count == 8 and (slot, instance['vcpu'], instance['memory_mb'], instance['data_disk']) != (1, 128, 480000, 600):
+            raise ValueError('eight GPUs require slot 1, 128 vCPU, 480000 MB and the included 600 GiB data disk')
         if headless and (instance['vcpu'] != 2 or instance['memory_mb'] != 4000 or instance.get('slot') is not None):
             raise ValueError('headless must have 2 vCPU, 4000 MB and no GPU slot')
         # Fail closed before detaching a GPU if the host export lost read-only
@@ -201,8 +214,13 @@ class LibvirtBackend:
         if (self.path(instance) / 'shared-storage-disabled').exists():
             shared_export = None
         self.shared_states.pop(str(instance['id']), None)
+        if not headless and count == 8:
+            self.eight_card_numa(instance)
+            self.eight_card_memory_guard(instance)
         if not headless:
-            self.preflight(slot)
+            for allocated_slot in instance_slots(instance):
+                self.preflight(allocated_slot)
+        numa = self.four_card_numa(instance) if not headless and count == 4 else None
         directory = self.path(instance)
         domain = ET.Element('domain',{'type':'kvm','xmlns:qemu':'http://libvirt.org/schemas/domain/qemu/1.0'})
         def add(parent, tag, text=None, **attrs):
@@ -217,8 +235,20 @@ class LibvirtBackend:
             existing_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, '1cat-rental-' + str(instance['id'])))
         add(domain,'uuid',existing_uuid)
         add(domain,'memory',instance['memory_mb'],unit='MB')
-        add(domain,'vcpu',instance['vcpu'])
-        if shared_export:
+        add(domain,'vcpu',instance['vcpu'], **({'cpuset': numa[1]} if numa else {'placement':'static'} if count == 8 and not headless else {}))
+        if count == 8 and not headless:
+            tune = add(domain, 'cputune')
+            for vcpu in range(128):
+                add(tune, 'vcpupin', vcpu=vcpu,
+                    cpuset='4-31,68-95' if vcpu < 64 else '36-63,100-127')
+            add(tune, 'emulatorpin', cpuset='0-3,32-35,64-67,96-99')
+        if numa:
+            add(add(domain,'numatune'),'memory',mode='preferred',nodeset=numa[0])
+        if count == 8 and not headless:
+            numatune = add(domain, 'numatune')
+            add(numatune, 'memnode', cellid='0', mode='preferred', nodeset='0')
+            add(numatune, 'memnode', cellid='1', mode='preferred', nodeset='1')
+        if shared_export or count == 8 and not headless:
             memory_backing = add(domain, 'memoryBacking')
             add(memory_backing, 'source', type='memfd')
             add(memory_backing, 'access', mode='shared')
@@ -229,9 +259,14 @@ class LibvirtBackend:
         add(osxml,'boot',dev='hd')
         features=add(domain,'features'); add(features,'acpi'); add(features,'apic')
         cpu=add(domain,'cpu',mode='host-passthrough',check='none')
-        add(cpu,'topology',sockets='1',cores=instance['vcpu'],threads='1')
+        add(cpu,'topology',sockets='2' if count == 8 and not headless else '1',
+            cores='64' if count == 8 and not headless else instance['vcpu'],threads='1')
         if not headless:
             add(cpu,'maxphysaddr',mode='emulate',bits='42')
+        if count == 8 and not headless:
+            guest_numa = add(cpu, 'numa')
+            add(guest_numa, 'cell', id='0', cpus='0-63', memory='240000', unit='MB')
+            add(guest_numa, 'cell', id='1', cpus='64-127', memory='240000', unit='MB')
         add(domain,'on_poweroff','destroy'); add(domain,'on_reboot','restart'); add(domain,'on_crash','destroy')
         devices=add(domain,'devices')
         add(devices,'emulator','/usr/bin/qemu-system-x86_64')
@@ -245,7 +280,7 @@ class LibvirtBackend:
         root=add(devices,'controller',type='pci',index='0',model='pcie-root')
         if not headless:
             add(root,'pcihole64',2147483648,unit='KiB')
-        for index in range(1,9):
+        for index in range(1,17 if count == 8 and not headless else 13 if count == 4 and not headless else 9):
             port=add(devices,'controller',type='pci',index=index,model='pcie-root-port')
             add(port,'target',chassis=index,port=hex(7+index))
         disk_files = [(self.system_path(instance), 'vda')]
@@ -266,16 +301,54 @@ class LibvirtBackend:
         console=add(devices,'console',type='pty');add(console,'target',type='serial',port='0')
         channel=add(devices,'channel',type='unix');add(channel,'target',type='virtio',name='org.qemu.guest_agent.0')
         if not headless:
-            hostdev=add(devices,'hostdev',mode='subsystem',type='pci',managed='yes')
-            source=add(hostdev,'source')
-            m=re.fullmatch(r'([0-9a-f]{4}):([0-9a-f]{2}):([0-9a-f]{2})\.([0-7])',self.config['bdfs'][slot-1])
-            if not m: raise ValueError('Invalid configured PCI address')
-            add(source,'address',**dict(zip(['domain','bus','slot','function'],['0x'+s for s in m.groups()])))
-            add(hostdev,'address',type='pci',domain='0x0000',bus='0x05',slot='0x00',function='0x0')
+            for guest_bus, allocated_slot in enumerate(instance_slots(instance), 5):
+                hostdev=add(devices,'hostdev',mode='subsystem',type='pci',managed='yes')
+                source=add(hostdev,'source')
+                m=re.fullmatch(r'([0-9a-f]{4}):([0-9a-f]{2}):([0-9a-f]{2})\.([0-7])',self.config['bdfs'][allocated_slot-1])
+                if not m: raise ValueError('Invalid configured PCI address')
+                add(source,'address',**dict(zip(['domain','bus','slot','function'],['0x'+s for s in m.groups()])))
+                add(hostdev,'address',type='pci',domain='0x0000',bus=f'0x{guest_bus:02x}',slot='0x00',function='0x0')
             qemu=add(domain,'qemu:commandline');add(qemu,'qemu:arg',value='-fw_cfg')
             add(qemu,'qemu:arg',value='name=opt/ovmf/X-PciMmio64Mb,string=1179648')
         xml=directory/'domain.xml';xml.write_text(ET.tostring(domain,encoding='unicode'))
-        self.virsh('define',xml,'--validate');self.virsh('start',self.name(instance),timeout=90)
+        self.virsh('define',xml,'--validate')
+        if count == 8 and not headless:
+            self.eight_card_memory_guard(instance)
+        self.virsh('start',self.name(instance),timeout=900 if count == 8 and not headless else 600 if count == 4 and not headless else 90)
+
+    def eight_card_numa(self, instance):
+        """Fail closed unless the exact two-socket mapping proven in QA is present."""
+        first = self.four_card_numa({**instance, 'slot': 1, 'gpu_count': 4})
+        second = self.four_card_numa({**instance, 'slot': 5, 'gpu_count': 4})
+        if first != (0, '0-31,64-95') or second != (1, '32-63,96-127'):
+            raise RuntimeError('eight-card CPU/GPU NUMA topology differs from acceptance')
+
+    @staticmethod
+    def eight_card_memory_guard(instance):
+        line = next((line for line in Path('/proc/meminfo').read_text().splitlines()
+                     if line.startswith('MemAvailable:')), None)
+        if line is None:
+            raise RuntimeError('host memory availability is unknown')
+        available_bytes = int(line.split()[1]) * 1024
+        required_bytes = instance['memory_mb'] * 1_000_000 + 32 * 1024**3
+        if available_bytes < required_bytes:
+            raise RuntimeError('host memory safety reserve would be breached by eight-card VM')
+
+    def four_card_numa(self, instance):
+        nodes = set()
+        for slot in instance_slots(instance):
+            bdf = self.config['bdfs'][slot-1]
+            device = Path('/sys/bus/pci/devices') / bdf
+            if sorted(p.name for p in (device/'iommu_group/devices').iterdir()) != [bdf]:
+                raise RuntimeError('four-card plan requires independent IOMMU groups')
+            nodes.add(int((device/'numa_node').read_text()))
+        if len(nodes) != 1 or min(nodes) < 0:
+            raise RuntimeError('four-card plan requires one verified NUMA group')
+        node = nodes.pop()
+        cpuset = (Path('/sys/devices/system/node')/f'node{node}'/'cpulist').read_text().strip()
+        if not re.fullmatch(r'[0-9,-]+', cpuset):
+            raise RuntimeError('invalid NUMA CPU set')
+        return node, cpuset
 
     @staticmethod
     def mac_address(instance):
@@ -311,9 +384,10 @@ class LibvirtBackend:
                 if status.get('exited'):
                     if status.get('exitcode') != 0: return None
                     output=base64.b64decode(status.get('out-data','')).decode(errors='replace')
-                    if not re.search(r'Attached AIPs\s*:\s*1\b',output): return None
-                    if not re.search(r'Module status\s*:\s*Operational',output): return None
-                    if not re.search(r'Memory Usage[\s\S]*?Total\s*:\s*98304\s*MB',output): return None
+                    count = gpu_count(instance.get('gpu_count', 1))
+                    if not re.search(rf'Attached AIPs\s*:\s*{count}\b',output): return None
+                    if len(re.findall(r'Module status\s*:\s*Operational',output)) != count: return None
+                    if len(re.findall(r'Memory Usage[\s\S]*?Total\s*:\s*98304\s*MB',output)) != count: return None
                     with socket.create_connection((ip,22),timeout=3) as sock:
                         if not sock.recv(128).startswith(b'SSH-'): return None
                     if not self.ensure_shared_guest(instance): return None
@@ -367,13 +441,16 @@ class LibvirtBackend:
         if self.state(instance)=='running': self.virsh('shutdown',self.name(instance))
 
     def force_off(self, instance):
-        if self.state(instance) == 'running':
-            self.virsh('destroy', self.name(instance))
+        if self.state(instance) in ('running', 'stopping'):
+            self.virsh('destroy', self.name(instance), timeout=600 if instance.get('gpu_count',1) in (4,8) else 30)
 
     def recovered(self, instance):
         if self.state(instance) not in ('off','absent'): return False
         if instance.get('slot') is None: return True
-        try: self.preflight(instance['slot']); return True
+        try:
+            for slot in instance_slots(instance):
+                self.preflight(slot)
+            return True
         except (RuntimeError,subprocess.TimeoutExpired): return False
 
     def release(self, instance):

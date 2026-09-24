@@ -17,6 +17,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 from recharge_codes import RechargeCodeMixin
+from gpu_plans import gpu_count, gpu_slots
+from placement import placement_decision
 
 
 ACTIVE_STATES = ("provisioning", "running", "stopping", "deleting", "quarantined")
@@ -29,6 +31,7 @@ FIXED_VCPU = 16
 # an accidental 62.5 GiB allocation.
 FIXED_MEMORY_MB = 62_500
 FIXED_MEMORY_GB = 62.5
+MAX_SINGLE_GPU_MEMORY_MB = 128_000
 HEADLESS_VCPU = 2
 HEADLESS_MEMORY_MB = 4_000
 HEADLESS_RATE_CENTS = 8
@@ -37,6 +40,9 @@ COMPUTE_UNITS_PER_CENT = 3_600_000_000
 SYSTEM_DISK_GIB = 50
 FREE_DATA_DISK_GIB = 0
 MAX_DATA_DISK_GIB = 200
+EIGHT_GPU_MEMORY_MB = 480_000
+EIGHT_GPU_GIFT_DISK_GIB = 600
+EIGHT_GPU_MIN_CREATE_BALANCE_CENTS = 10_000
 # AutoDL reference: 0.0066 CNY/GB/day. This service applies the user's 70%
 # policy: 0.00462 CNY/GB/day = 0.462 cents/GB/day. Keep four decimal places
 # of a cent so small disks accumulate accurately before charging whole cents.
@@ -63,6 +69,7 @@ class Core(RechargeCodeMixin):
         storage_pool_budget: int = 0,
         headless_count: int = 16,
         nodes: Mapping[str, Mapping[str, Any]] | None = None,
+        local_node_id: str | None = LOCAL_NODE,
     ) -> None:
         for name, value in (
             ("memory_budget", memory_budget),
@@ -95,7 +102,10 @@ class Core(RechargeCodeMixin):
                             system_disk_budget=system_disk_budget, data_disk_budget=data_disk_budget,
                             storage_pool_budget=storage_pool_budget, slot_count=slot_count,
                             headless_count=headless_count)
-        self.nodes = {LOCAL_NODE: local_budget}
+        if local_node_id is not None and (not isinstance(local_node_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", local_node_id)):
+            raise ValueError('invalid local node id')
+        self.local_node_id = local_node_id
+        self.nodes = {local_node_id: local_budget} if local_node_id is not None else {}
         for ident, config in (nodes or {}).items():
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", ident):
                 raise ValueError("invalid node identifier")
@@ -105,6 +115,8 @@ class Core(RechargeCodeMixin):
             if not 1 <= budget['slot_count'] <= 8 or budget['headless_count'] > 64:
                 raise ValueError("invalid node slot budget")
             self.nodes[ident] = budget
+        if not self.nodes:
+            raise ValueError('controller requires at least one configured compute node')
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
@@ -235,8 +247,19 @@ class Core(RechargeCodeMixin):
         # Add after the legacy table rebuild, which only knows the old columns.
         with self._transaction() as con:
             self._ensure_column(con, "instances", "mode", "TEXT NOT NULL DEFAULT 'gpu'")
+            self._ensure_column(con, "instances", "gpu_count", "INTEGER NOT NULL DEFAULT 1 CHECK(gpu_count IN (1,4))")
             self._ensure_column(con, "instances", "endpoint", "INTEGER")
             self._ensure_column(con, "instances", "compute_remainder", "INTEGER NOT NULL DEFAULT 0")
+            # Operator-verified enlargement of an existing data.qcow2. Keep the
+            # purchased disk size unchanged for billing and node lease identity.
+            self._ensure_column(con, "instances", "gift_data_disk_gib", "INTEGER NOT NULL DEFAULT 0 CHECK(gift_data_disk_gib >= 0)")
+            # Retain the eight-card origin after a downgrade.  A gifted disk
+            # must not shrink or become billable just because the GPU plan did.
+            self._ensure_column(con, "instances", "eight_card_gift_disk", "INTEGER NOT NULL DEFAULT 0 CHECK(eight_card_gift_disk IN (0,1))")
+            # An operator may raise one single-GPU instance within the included
+            # 128 GB allowance. Keep this separate from ram so headless mode
+            # does not erase the GPU allocation chosen for the next boot.
+            self._ensure_column(con, "instances", "gpu_memory_override_mb", "INTEGER CHECK(gpu_memory_override_mb BETWEEN 62500 AND 128000)")
             new_units_column = "metered_units" not in {r[1] for r in con.execute("PRAGMA table_info(usage_ledger)")}
             self._ensure_column(con, "usage_ledger", "metered_units", "INTEGER NOT NULL DEFAULT 0")
             con.execute("UPDATE instances SET endpoint=slot WHERE slot IS NOT NULL AND endpoint IS NULL")
@@ -249,6 +272,49 @@ class Core(RechargeCodeMixin):
             con.execute("CREATE UNIQUE INDEX one_active_endpoint ON instances(node_id,endpoint) WHERE endpoint IS NOT NULL")
             if new_units_column:
                 con.execute("UPDATE usage_ledger SET metered_units=MAX(metered_cents,charged_cents)*?", (COMPUTE_UNITS_PER_CENT,))
+        self._migrate_eight_gpu_constraint()
+        with self._transaction() as con:
+            con.execute("UPDATE instances SET eight_card_gift_disk=1 WHERE gpu_count=8 AND data_disk=0 AND gift_data_disk_gib=?",
+                        (EIGHT_GPU_GIFT_DISK_GIB,))
+
+    def _migrate_eight_gpu_constraint(self) -> None:
+        """Widen the GPU-count CHECK without changing any existing instance data."""
+        con = self._connect()
+        try:
+            schema = con.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='instances'").fetchone()[0]
+            if re.search(r"CHECK\s*\(\s*gpu_count\s+IN\s*\(\s*1\s*,\s*4\s*,\s*8\s*\)\s*\)", schema, re.I):
+                return
+            widened, count = re.subn(r"CHECK\s*\(\s*gpu_count\s+IN\s*\(\s*1\s*,\s*4\s*\)\s*\)",
+                                     'CHECK(gpu_count IN (1,4,8))', schema, count=1, flags=re.I)
+            table_header = re.match(r'^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"instances"|instances)\s*(?=\()', schema, re.I)
+            if count != 1 or table_header is None:
+                raise RuntimeError('unexpected instances schema; refuse GPU plan migration')
+            indexes = [row[0] for row in con.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='instances' AND sql IS NOT NULL")]
+            if con.execute("SELECT 1 FROM sqlite_master WHERE name='instances_gpu8_migration'").fetchone():
+                raise RuntimeError('unfinished GPU plan migration table exists')
+            sequence = con.execute("SELECT seq FROM sqlite_sequence WHERE name='instances'").fetchone()
+            old_sequence = sequence[0] if sequence else 0
+            old_count = con.execute('SELECT COUNT(*) FROM instances').fetchone()[0]
+            con.execute('PRAGMA foreign_keys=OFF')
+            con.execute('BEGIN IMMEDIATE')
+            try:
+                new_schema = 'CREATE TABLE instances_gpu8_migration ' + widened[table_header.end():]
+                con.execute(new_schema)
+                con.execute('INSERT INTO instances_gpu8_migration SELECT * FROM instances')
+                con.execute('DROP TABLE instances')
+                con.execute('ALTER TABLE instances_gpu8_migration RENAME TO instances')
+                for statement in indexes:
+                    con.execute(statement)
+                con.execute("UPDATE sqlite_sequence SET seq=MAX(seq, ?) WHERE name='instances'", (old_sequence,))
+                if con.execute('SELECT COUNT(*) FROM instances').fetchone()[0] != old_count or con.execute('PRAGMA foreign_key_check').fetchall():
+                    raise RuntimeError('GPU plan migration validation failed')
+                con.commit()
+            except BaseException:
+                con.rollback()
+                raise
+        finally:
+            con.close()
 
     def _migrate_slot_constraint(self) -> None:
         """Rebuild the legacy 4-slot table without rewinding business data."""
@@ -616,10 +682,127 @@ class Core(RechargeCodeMixin):
                 "effective": "next_start",
             })
 
+    def _placement_policy(self, con):
+        row = con.execute("SELECT value FROM settings WHERE key='placement_policy'").fetchone()
+        return json.loads(row[0]) if row else {'enabled': True, 'preferredNode': LOCAL_NODE if LOCAL_NODE in self.nodes else next(iter(self.nodes))}
+
+    def placement_policy(self):
+        with self._connection() as con:
+            return self._placement_policy(con)
+
+    def set_placement_policy(self, admin, policy, expected):
+        if not self.is_admin(admin):
+            raise PermissionError('admin required')
+        if not isinstance(policy, dict) or set(policy) != {'enabled', 'preferredNode'} or type(policy['enabled']) is not bool or not isinstance(policy['preferredNode'], str) or policy['preferredNode'] not in self.nodes:
+            raise ValueError('invalid placement policy')
+        if not isinstance(expected, dict) or set(expected) != {'enabled', 'preferredNode'} or type(expected['enabled']) is not bool or not isinstance(expected['preferredNode'], str):
+            raise ValueError('expected policy required')
+        with self._transaction() as con:
+            old = self._placement_policy(con)
+            if old == policy:
+                return old
+            if old != expected:
+                raise ValueError('调度规则已被修改，请重新加载后保存')
+            con.execute("INSERT INTO settings(key,value) VALUES ('placement_policy',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (json.dumps(policy),))
+            self._audit(con, admin, 'placement_policy_changed', 'new_instances', {'old': old, 'new': policy})
+        return policy
+
+    def _placement(self, con, observations, *, mode, count, system_gib, data_gib):
+        totals = {r['node_id']: {'system': r['system_gib'], 'data': r['data_gib']} for r in con.execute(
+            "SELECT node_id,SUM(sys_disk) system_gib,SUM(data_disk+gift_data_disk_gib) data_gib FROM instances WHERE state!='deleted' GROUP BY node_id")}
+        held = {}
+        for row in con.execute('SELECT node_id,slot,gpu_count FROM instances WHERE slot IS NOT NULL'):
+            held.setdefault(row['node_id'], set()).update(gpu_slots(row['slot'], row['gpu_count']))
+        budgets = {ident: ({key: getattr(self, key) for key in budget} if ident == self.local_node_id else budget)
+                   for ident, budget in self.nodes.items()}
+        return placement_decision(self._placement_policy(con), budgets, totals, held, observations,
+                                  mode=mode, count=count, system_gib=system_gib, data_gib=data_gib)
+
+    def placement_quote(self, spec, observations):
+        _, _, system, data, _, _ = self._spec(spec)
+        count = gpu_count(spec.get('gpu_count', 1))
+        with self._connection() as con:
+            return self._placement(con, observations, mode=spec.get('mode', 'gpu'),
+                                   count=count, system_gib=system,
+                                   data_gib=data + (EIGHT_GPU_GIFT_DISK_GIB if count == 8 else 0))
+
     @staticmethod
     def _audit(con, actor, event, target, detail):
         con.execute("INSERT INTO audit_events(actor,event,target,detail,created_at) VALUES (?,?,?,?,?)",
                     (actor, event, str(target), json.dumps(detail, ensure_ascii=False), _now()))
+
+    def record_storage_gift(self, admin: str, owner: str, instance_id: int,
+                            gift_gib: int, *, expected_gift_gib: int,
+                            verified_total_gib: int) -> dict[str, Any]:
+        """Record an operator-verified, already enlarged existing data volume.
+
+        This does not resize disks and is deliberately not a customer HTTP API.
+        Never change data_disk: both historical billing and active node leases
+        depend on it. Gifts count toward capacity and follow instance deletion.
+        """
+        if not self.is_admin(admin):
+            raise PermissionError("admin required")
+        if any(type(value) is not int for value in (gift_gib, expected_gift_gib, verified_total_gib)):
+            raise ValueError("storage gift sizes must be integers")
+        if not 0 <= expected_gift_gib <= gift_gib <= 3300 or gift_gib == 0:
+            raise ValueError("storage gifts must be positive and cannot shrink")
+        with self._transaction() as con:
+            self._require_active_user(con, owner)
+            row = self._owned(con, owner, instance_id)
+            if row['state'] not in ('running', 'stopped') or row['data_disk'] <= 0 or row['generation'] < 1:
+                raise ValueError("gift requires an existing initialized data disk")
+            if verified_total_gib != row['data_disk'] + gift_gib:
+                raise ValueError("verified disk size does not match requested gift")
+            old = row['gift_data_disk_gib']
+            if old == gift_gib:
+                return self._public(row)
+            if old != expected_gift_gib:
+                raise ValueError("storage gift changed; refresh before retry")
+            self._capacity(con, 0, 0, 0, gift_gib - old, allocate=False, node_id=row['node_id'])
+            con.execute("UPDATE instances SET gift_data_disk_gib=? WHERE id=?", (gift_gib, instance_id))
+            self._audit(con, admin, "storage_gift_recorded", instance_id, {
+                "owner": owner, "nodeId": row['node_id'], "oldGiftGiB": old,
+                "giftGiB": gift_gib, "totalGiB": verified_total_gib,
+                "billableGiB": row['data_disk'], "billing": "unchanged",
+                "physicalResize": "verified_by_operator",
+            })
+            return self._public(con.execute("SELECT * FROM instances WHERE id=?", (instance_id,)).fetchone())
+
+    def set_gpu_memory_override(self, admin: str, instance_id: int, memory_mb: int,
+                                *, expected_mb: int) -> dict[str, Any]:
+        """Set an operator-only, single-GPU memory allocation for future starts.
+
+        The VM must be fully stopped so the database never reports a larger
+        running allocation than libvirt actually provides. Normal orders stay
+        fixed at 62.5 GB; the existing GPU hourly price is unchanged.
+        """
+        if not self.is_admin(admin):
+            raise PermissionError("admin required")
+        if type(memory_mb) is not int or type(expected_mb) is not int:
+            raise ValueError("memory sizes must be integer MB")
+        if not FIXED_MEMORY_MB <= memory_mb <= MAX_SINGLE_GPU_MEMORY_MB or memory_mb % 500:
+            raise ValueError("single-GPU memory must be 62500..128000 MB in 500 MB steps")
+        with self._transaction() as con:
+            row = self._worker_row(con, instance_id)
+            if row['gpu_count'] != 1 or row['state'] != 'stopped' or row['endpoint'] is not None or row['desired_action'] is not None:
+                raise ValueError("memory change requires a fully stopped single-GPU instance")
+            old = row['gpu_memory_override_mb'] or FIXED_MEMORY_MB
+            if old != expected_mb:
+                raise ValueError("GPU memory changed; refresh before retry")
+            if row['mode'] == 'gpu' and row['ram'] != old:
+                raise ValueError("stored GPU memory does not match its override")
+            if memory_mb == old:
+                return self._public(row)
+            self._capacity(con, FIXED_VCPU, memory_mb, 0, 0, allocate=False, node_id=row['node_id'])
+            con.execute(
+                "UPDATE instances SET gpu_memory_override_mb=?, ram=CASE WHEN mode='gpu' THEN ? ELSE ram END, updated_at=? WHERE id=?",
+                (None if memory_mb == FIXED_MEMORY_MB else memory_mb, memory_mb, _now(), instance_id),
+            )
+            self._audit(con, admin, "gpu_memory_override", instance_id, {
+                "nodeId": row['node_id'], "oldMemoryMB": old,
+                "memoryMB": memory_mb, "billing": "unchanged",
+            })
+            return self._public(con.execute("SELECT * FROM instances WHERE id=?", (instance_id,)).fetchone())
 
     def audit(self, admin):
         if not self.is_admin(admin):
@@ -692,11 +875,12 @@ class Core(RechargeCodeMixin):
     def _spec(spec: Mapping[str, Any]) -> tuple[int, int, int, int, bool, bytes | None]:
         if not isinstance(spec, Mapping):
             raise ValueError("spec must be a mapping")
-        allowed = {"cpu", "ram", "sys", "data", "gpu", "mode", "free_test", "opaque_secret"}
+        allowed = {"cpu", "ram", "sys", "data", "gpu", "gpu_count", "mode", "free_test", "opaque_secret"}
         unknown = set(spec) - allowed
         if unknown:
             raise ValueError(f"unknown spec fields: {', '.join(sorted(unknown))}")
         mode = spec.get("mode", "gpu")
+        count = gpu_count(spec.get("gpu_count", 1))
         if mode not in ("gpu", "headless"):
             raise ValueError("mode must be gpu or headless")
         if "gpu" in spec and spec["gpu"] not in (("SINGLE_GAUDI2", "Gaudi2") if mode == "gpu" else (None, "none")):
@@ -705,15 +889,15 @@ class Core(RechargeCodeMixin):
         if not isinstance(free_test, bool):
             raise ValueError("free_test must be boolean")
         values = []
-        for key, expected in (("cpu", HEADLESS_VCPU if mode == "headless" else FIXED_VCPU),
-                              ("ram", HEADLESS_MEMORY_MB if mode == "headless" else FIXED_MEMORY_MB)):
+        for key, expected in (("cpu", HEADLESS_VCPU if mode == "headless" else FIXED_VCPU * count),
+                              ("ram", HEADLESS_MEMORY_MB if mode == "headless" else EIGHT_GPU_MEMORY_MB if count == 8 else FIXED_MEMORY_MB * count)):
             value = spec.get(key, expected)
             if isinstance(value, bool) or not isinstance(value, int) or value != expected:
                 raise ValueError(f"{key} is fixed at {expected}")
             values.append(value)
         for key, low, high, default in (
             ("sys", SYSTEM_DISK_GIB, SYSTEM_DISK_GIB, SYSTEM_DISK_GIB),
-            ("data", 0, MAX_DATA_DISK_GIB, 0),
+            ("data", 0, 0 if count == 8 else MAX_DATA_DISK_GIB, 0),
         ):
             value = spec.get(key, default)
             if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
@@ -733,8 +917,12 @@ class Core(RechargeCodeMixin):
             "ram": row["ram"],
             "sys": row["sys_disk"],
             "data": row["data_disk"],
+            "gift_data_disk_gib": row["gift_data_disk_gib"],
+            "eight_card_gift_disk": bool(row["eight_card_gift_disk"]),
             "free_test": bool(row["free_test"]),
             "slot": row["slot"],
+            "gpu_count": row["gpu_count"],
+            "slots": gpu_slots(row["slot"], row["gpu_count"]),
             "mode": row["mode"],
             "endpoint": row["endpoint"],
             "node_id": row["node_id"],
@@ -759,17 +947,18 @@ class Core(RechargeCodeMixin):
         allocate: bool = True,
         mode: str = "gpu",
         node_id: str = LOCAL_NODE,
+        count: int = 1,
     ) -> int | None:
         if node_id not in self.nodes:
             raise RuntimeError("instance node is not configured")
         budget = self.nodes[node_id]
-        if node_id == LOCAL_NODE:
+        if node_id == self.local_node_id:
             budget = {key: getattr(self, key) for key in budget}
         totals = con.execute(
             """SELECT COALESCE(SUM(CASE WHEN endpoint IS NOT NULL THEN cpu ELSE 0 END), 0) cpu,
                       COALESCE(SUM(CASE WHEN endpoint IS NOT NULL THEN ram ELSE 0 END), 0) ram,
                       COALESCE(SUM(CASE WHEN state != 'deleted' THEN sys_disk ELSE 0 END), 0) system_disk,
-                      COALESCE(SUM(CASE WHEN state != 'deleted' THEN data_disk ELSE 0 END), 0) data_disk
+                      COALESCE(SUM(CASE WHEN state != 'deleted' THEN data_disk + gift_data_disk_gib ELSE 0 END), 0) data_disk
                  FROM instances WHERE node_id=?""", (node_id,)
         ).fetchone()
         if totals["cpu"] + cpu > budget['cpu_budget']:
@@ -790,18 +979,24 @@ class Core(RechargeCodeMixin):
             if available is None:
                 raise RuntimeError("无头资源不足，暂时无法开机")
             return available
-        used = {row[0] for row in con.execute("SELECT slot FROM instances WHERE node_id=? AND slot IS NOT NULL", (node_id,))}
+        count = gpu_count(count)
+        used = {slot for row in con.execute("SELECT slot,gpu_count FROM instances WHERE node_id=? AND slot IS NOT NULL", (node_id,))
+                for slot in gpu_slots(row[0], row[1])}
+        starts = (1, 5) if count == 4 else (1,) if count == 8 else range(1, budget['slot_count'] + 1)
         try:
-            return next(slot for slot in range(1, budget['slot_count'] + 1) if slot not in used)
+            return next(slot for slot in starts if slot + count - 1 <= budget['slot_count']
+                        and not used.intersection(gpu_slots(slot, count)))
         except StopIteration as exc:
-            raise RuntimeError("no active Gaudi2 slot available") from exc
+            raise RuntimeError("四卡资源不足，需要同一节点完整空闲的四卡组" if count == 4 else "八卡资源不足，需要同一节点全部八卡空闲" if count == 8 else "no active Gaudi2 slot available") from exc
 
-    def order(self, owner: str, spec: Mapping[str, Any], idempotency: str, node_id: str = LOCAL_NODE) -> dict[str, Any]:
+    def order(self, owner: str, spec: Mapping[str, Any], idempotency: str, node_id: str | None = LOCAL_NODE,
+              *, observations: Mapping[str, Any] | None = None) -> dict[str, Any]:
         owner = self._owner(owner)
         if not isinstance(idempotency, str) or not idempotency.strip():
             raise ValueError("idempotency must be a non-empty string")
         cpu, ram, sys_disk, data_disk, free_test, opaque = self._spec(spec)
         mode = spec.get("mode", "gpu")
+        count = gpu_count(spec.get("gpu_count", 1))
         with self._transaction() as con:
             self._require_active_user(con, owner)
             existing = con.execute(
@@ -809,23 +1004,43 @@ class Core(RechargeCodeMixin):
                 (owner, idempotency),
             ).fetchone()
             if existing is not None:
-                if existing['node_id'] != node_id:
+                if existing['gpu_count'] != count:
+                    raise ValueError("idempotency key already used for a different GPU plan")
+                if node_id is not None and existing['node_id'] != node_id:
                     raise ValueError("idempotency key already used for a different node")
                 if (existing["cpu"], existing["ram"], existing["sys_disk"], existing["data_disk"]) != (cpu, ram, sys_disk, data_disk):
                     raise ValueError("idempotency key already used for a different instance specification")
                 return self._public(existing)
-            self._capacity(con, 0, 0, sys_disk, data_disk, allocate=False, node_id=node_id)
+            if count == 8:
+                balance = con.execute("SELECT balance_cents FROM users WHERE name=?", (owner,)).fetchone()[0]
+                if balance <= EIGHT_GPU_MIN_CREATE_BALANCE_CENTS:
+                    raise RuntimeError('创建八卡实例要求余额大于 ¥100.00，请先充值')
+            if observations is not None:
+                decision = self._placement(con, observations, mode=mode, count=count, system_gib=sys_disk,
+                                           data_gib=data_disk + (EIGHT_GPU_GIFT_DISK_GIB if count == 8 else 0))
+                node_id = node_id or decision['recommendedNode']
+                selected = next((n for n in decision['nodes'] if n['id'] == node_id), None)
+                if selected is None:
+                    raise RuntimeError('当前没有满足条件的节点，请稍后重试')
+                if not selected['allowed'] or not selected['createAvailable']:
+                    raise RuntimeError(selected['reason'])
+            gift_disk = EIGHT_GPU_GIFT_DISK_GIB if count == 8 else 0
+            self._capacity(con, 0, 0, sys_disk, data_disk + gift_disk, allocate=False, node_id=node_id)
             now = _now()
             cur = con.execute(
                 """INSERT INTO instances
                    (owner, idempotency, cpu, ram, sys_disk, data_disk, free_test, slot, state,
-                    desired_action, opaque_secret, created_at, updated_at, last_activity_at, mode, node_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'stopped', NULL, ?, ?, ?, ?, ?, ?)""",
+                    desired_action, opaque_secret, created_at, updated_at, last_activity_at, mode, node_id, gpu_count, gift_data_disk_gib, eight_card_gift_disk)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'stopped', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 # Keep the legacy column value true for existing databases; billing is
                 # controlled by rate_cents_per_hour, not this historical flag.
-                (owner, idempotency, cpu, ram, sys_disk, data_disk, 1, opaque, now, now, now, mode, node_id),
+                (owner, idempotency, cpu, ram, sys_disk, data_disk, 1, opaque, now, now, now, mode, node_id, count, gift_disk, int(count == 8)),
             )
             row = con.execute("SELECT * FROM instances WHERE id = ?", (cur.lastrowid,)).fetchone()
+            if observations is not None:
+                self._audit(con, owner, 'instance_placement', row['id'], {
+                    'nodeId': node_id, 'policy': decision['policy'], 'reasonCodes': decision['reasonCodes'],
+                    'mode': mode, 'gpuCount': count, 'gpuReserved': False})
         return self._public(row)
 
     def _owned(self, con: sqlite3.Connection, owner: str, instance_id: int) -> sqlite3.Row:
@@ -835,6 +1050,39 @@ class Core(RechargeCodeMixin):
         if row["owner"] != owner:
             raise PermissionError("instance belongs to another tenant")
         return row
+
+    def change_gpu_plan(self, owner: str, instance_id: int, target_count: int) -> dict[str, Any]:
+        """Change a stopped instance's next GPU boot profile without touching disks."""
+        owner = self._owner(owner)
+        target_count = gpu_count(target_count)
+        with self._transaction() as con:
+            self._require_active_user(con, owner)
+            row = self._owned(con, owner, instance_id)
+            if (row['state'] != 'stopped' or row['slot'] is not None or row['endpoint'] is not None
+                    or row['desired_action'] is not None):
+                raise ValueError('请先完全关机并等待 GPU 资源释放，再切换配置')
+            previous_count = row['gpu_count']
+            if target_count == previous_count:
+                return self._public(row)
+            if target_count == 8:
+                raise ValueError('已有实例不可升级至八卡；八卡实例只能降级')
+            if previous_count == 8 and (not row['eight_card_gift_disk'] or row['data_disk'] != 0
+                                        or row['gift_data_disk_gib'] != EIGHT_GPU_GIFT_DISK_GIB):
+                raise RuntimeError('八卡赠盘记录异常，停止换配以保护数据，请联系管理员')
+            if row['mode'] == 'headless':
+                cpu, ram = HEADLESS_VCPU, HEADLESS_MEMORY_MB
+            else:
+                cpu, ram = FIXED_VCPU * target_count, FIXED_MEMORY_MB * target_count
+            now = _now()
+            con.execute("""UPDATE instances SET gpu_count=?, cpu=?, ram=?, gpu_memory_override_mb=NULL,
+                           updated_at=?, last_activity_at=? WHERE id=?""",
+                        (target_count, cpu, ram, now, now, instance_id))
+            result = con.execute('SELECT * FROM instances WHERE id=?', (instance_id,)).fetchone()
+            self._audit(con, owner, 'instance_gpu_plan_changed', instance_id, {
+                'owner': owner, 'fromGpuCount': previous_count, 'toGpuCount': target_count,
+                'retainedGiftDiskGiB': result['gift_data_disk_gib'],
+                'billableDataDiskGiB': result['data_disk'], 'nodeId': result['node_id']})
+            return self._public(result)
 
     def action(self, owner: str, instance_id: int, verb: str, actor: str | None = None, mode: str | None = None) -> dict[str, Any]:
         owner = self._owner(owner)
@@ -856,7 +1104,7 @@ class Core(RechargeCodeMixin):
                     return self._public(row)
                 if state not in ("stopped", "error") or row["endpoint"] is not None:
                     raise ValueError(f"cannot start instance in {state}")
-                if self.rate_for_mode(selected_mode) > 0:
+                if row['gpu_count'] != 8 and self.rate_for_mode(selected_mode, row['gpu_count']) > 0:
                     balance = con.execute("SELECT balance_cents FROM users WHERE name=?", (owner,)).fetchone()[0]
                     if balance <= 0:
                         raise RuntimeError("balance is zero; recharge before starting")
@@ -865,11 +1113,15 @@ class Core(RechargeCodeMixin):
                     (owner,),
                 ).fetchone():
                     raise RuntimeError("each customer may run only one GPU instance")
-                if row["mode"] == "gpu" and (row["cpu"] != FIXED_VCPU or row["ram"] != FIXED_MEMORY_MB):
+                override = row['gpu_memory_override_mb']
+                if override is not None and (row['gpu_count'] != 1 or not FIXED_MEMORY_MB <= override <= MAX_SINGLE_GPU_MEMORY_MB):
+                    raise RuntimeError("invalid GPU memory override")
+                gpu_ram = override if override is not None else EIGHT_GPU_MEMORY_MB if row['gpu_count'] == 8 else FIXED_MEMORY_MB * row['gpu_count']
+                if row["mode"] == "gpu" and (row["cpu"] != FIXED_VCPU * row['gpu_count'] or row["ram"] != gpu_ram):
                     raise RuntimeError("legacy variable-spec instance must be recreated")
-                cpu = HEADLESS_VCPU if selected_mode == "headless" else FIXED_VCPU
-                ram = HEADLESS_MEMORY_MB if selected_mode == "headless" else FIXED_MEMORY_MB
-                endpoint = self._capacity(con, cpu, ram, 0, 0, mode=selected_mode, node_id=row['node_id'])
+                cpu = HEADLESS_VCPU if selected_mode == "headless" else FIXED_VCPU * row['gpu_count']
+                ram = HEADLESS_MEMORY_MB if selected_mode == "headless" else gpu_ram
+                endpoint = self._capacity(con, cpu, ram, 0, 0, mode=selected_mode, node_id=row['node_id'], count=row['gpu_count'])
                 slot = endpoint if selected_mode == "gpu" else None
                 con.execute(
                     "UPDATE instances SET slot=?, endpoint=?, mode=?, cpu=?, ram=?, generation=generation+1, confirmed_through=NULL, state='provisioning', desired_action='start', error=NULL, updated_at=?, last_activity_at=? WHERE id=?",
@@ -907,9 +1159,9 @@ class Core(RechargeCodeMixin):
         """Return only scheduler-safe occupancy data, without tenant names."""
         with self._connection() as con:
             rows = con.execute(
-                "SELECT id, slot, state, node_id FROM instances WHERE slot IS NOT NULL ORDER BY node_id,slot"
+                "SELECT id, slot, gpu_count, state, node_id FROM instances WHERE slot IS NOT NULL ORDER BY node_id,slot"
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [{**dict(row), 'slot': slot} for row in rows for slot in gpu_slots(row['slot'], row['gpu_count'])]
 
     def active_instances(self) -> list[dict[str, Any]]:
         """Return worker-owned details for instances holding a GPU slot."""
@@ -939,8 +1191,10 @@ class Core(RechargeCodeMixin):
                 return self._public(row)
             if row["state"] != "provisioning" or row["endpoint"] is None:
                 raise ValueError(f"cannot mark running from {row['state']}")
-            if self.rate_for_mode(row["mode"]) > 0 and con.execute("SELECT balance_cents FROM users WHERE name=?", (row["owner"],)).fetchone()[0] <= 0:
-                raise RuntimeError("balance is zero; start cancelled")
+            if row['gpu_count'] != 8 and self.rate_for_mode(row["mode"], row['gpu_count']) > 0:
+                balance = con.execute("SELECT balance_cents FROM users WHERE name=?", (row["owner"],)).fetchone()[0]
+                if balance <= 0:
+                    raise RuntimeError("balance is zero; start cancelled")
             now = _now()
             con.execute(
                 "UPDATE instances SET state='running', desired_action=NULL, error=NULL, updated_at=?, last_activity_at=?, confirmed_through=? WHERE id=?",
@@ -948,7 +1202,7 @@ class Core(RechargeCodeMixin):
             )
             con.execute(
                 "INSERT INTO usage_ledger(instance_id, owner, opened_at, rate_cents_per_hour, last_billed_at) VALUES (?, ?, ?, ?, ?)",
-                (instance_id, row["owner"], now, self.rate_for_mode(row["mode"]), now),
+                (instance_id, row["owner"], now, self.rate_for_mode(row["mode"], row['gpu_count']), now),
             )
             result = con.execute("SELECT * FROM instances WHERE id=?", (instance_id,)).fetchone()
         return self._public(result)
@@ -1042,8 +1296,8 @@ class Core(RechargeCodeMixin):
             raise ValueError("invalid node observation time")
         observed = min(stamp, now).isoformat(timespec='microseconds')
         with self._transaction() as con:
-            con.execute("UPDATE instances SET confirmed_through=? WHERE id=? AND generation=? AND node_id!=? AND (confirmed_through IS NULL OR confirmed_through<?)",
-                        (observed, instance_id, generation, LOCAL_NODE, observed))
+            con.execute("UPDATE instances SET confirmed_through=? WHERE id=? AND generation=? AND (? IS NULL OR node_id!=?) AND (confirmed_through IS NULL OR confirmed_through<?)",
+                        (observed, instance_id, generation, self.local_node_id, self.local_node_id, observed))
 
     def observe_poweroff(self, instance_id: int, generation: int | None = None):
         """Close compute metering as soon as libvirt proves the guest is off.
@@ -1053,13 +1307,14 @@ class Core(RechargeCodeMixin):
         """
         with self._transaction() as con:
             row = self._worker_row(con, instance_id)
-            if row["state"] != "running" or (generation is not None and row['generation'] != generation):
+            if row["state"] not in ('running', 'stopping', 'deleting', 'quarantined') or (generation is not None and row['generation'] != generation):
                 return False
             now = _now()
             self._settle(con, datetime.fromisoformat(now), instance_id)
             con.execute("UPDATE usage_ledger SET closed_at=? WHERE instance_id=? AND closed_at IS NULL", (now, instance_id))
-            con.execute("UPDATE instances SET state='stopping', desired_action='stop', updated_at=?, error=? WHERE id=?",
-                        (now, "检测到实例已关机，正在回收资源", instance_id))
+            if row['state'] == 'running':
+                con.execute("UPDATE instances SET state='stopping', desired_action='stop', updated_at=?, error=? WHERE id=?",
+                            (now, "检测到实例已关机，正在回收资源", instance_id))
             self._audit(con, "system", "guest_poweroff_detected", instance_id, {"owner": row["owner"]})
             return True
 
@@ -1074,7 +1329,7 @@ class Core(RechargeCodeMixin):
             rate = row["rate_cents_per_hour"]
             if rate <= 0:
                 continue
-            through = now if row['node_id'] == LOCAL_NODE else min(now, datetime.fromisoformat(row['confirmed_through'] or row['opened_at']))
+            through = now if row['node_id'] == self.local_node_id else min(now, datetime.fromisoformat(row['confirmed_through'] or row['opened_at']))
             delta = through - datetime.fromisoformat(row["opened_at"])
             micros = max(0, (delta.days * 86400 + delta.seconds) * 1000000 + delta.microseconds)
             total_units = micros * rate
@@ -1137,13 +1392,19 @@ class Core(RechargeCodeMixin):
                 stop_ids.append(item["id"])
         return stop_ids
 
-    def rate_for_mode(self, mode):
-        return HEADLESS_RATE_CENTS if mode == "headless" else self.price()
+    def rate_for_mode(self, mode, count=1):
+        return HEADLESS_RATE_CENTS if mode == "headless" else self.price() * gpu_count(count)
 
     def pricing(self) -> dict[str, Any]:
         return {
             "cardCentsPerHour": self.price(),
             "headlessCentsPerHour": HEADLESS_RATE_CENTS,
+            "gpuPlans": [{"gpuCount": n, "vcpu": FIXED_VCPU*n,
+                          "memoryGB": EIGHT_GPU_MEMORY_MB / 1000 if n == 8 else FIXED_MEMORY_GB*n,
+                          "systemDiskGiB": SYSTEM_DISK_GIB,
+                          "giftDataDiskGiB": EIGHT_GPU_GIFT_DISK_GIB if n == 8 else 0,
+                          "minCreateBalanceExclusiveCents": EIGHT_GPU_MIN_CREATE_BALANCE_CENTS if n == 8 else 0,
+                          "rateCentsPerHour": self.price()*n} for n in (1,4,8)],
             "includedCpu": FIXED_VCPU,
             "includedMemoryGB": FIXED_MEMORY_GB,
             "includedMemoryMB": FIXED_MEMORY_MB,
@@ -1171,12 +1432,12 @@ class Core(RechargeCodeMixin):
     def metrics(self, node_id: str | None = None) -> dict[str, Any]:
         with self._connection() as con:
             totals = con.execute(
-                """SELECT COUNT(*) FILTER (WHERE slot IS NOT NULL) active,
+                """SELECT COALESCE(SUM(CASE WHEN slot IS NOT NULL THEN gpu_count ELSE 0 END), 0) active,
                           COALESCE(SUM(CASE WHEN endpoint IS NOT NULL AND mode='headless' THEN 1 ELSE 0 END), 0) headless,
                           COALESCE(SUM(CASE WHEN endpoint IS NOT NULL THEN cpu ELSE 0 END), 0) cpu,
                           COALESCE(SUM(CASE WHEN endpoint IS NOT NULL THEN ram ELSE 0 END), 0) ram,
                           COALESCE(SUM(CASE WHEN state != 'deleted' THEN sys_disk ELSE 0 END), 0) system_disk,
-                          COALESCE(SUM(CASE WHEN state != 'deleted' THEN data_disk ELSE 0 END), 0) data_disk
+                          COALESCE(SUM(CASE WHEN state != 'deleted' THEN data_disk + gift_data_disk_gib ELSE 0 END), 0) data_disk
                      FROM instances WHERE (? IS NULL OR node_id=?)""", (node_id, node_id)
             ).fetchone()
             states = {row["state"]: row["n"] for row in con.execute(

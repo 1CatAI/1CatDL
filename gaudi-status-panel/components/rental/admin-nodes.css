@@ -1,0 +1,166 @@
+/* Operate surface: compare the fleet, then inspect one node. */
+.admin-app .admin-nodes {
+  --node-gap-tight: 8px;
+  --node-gap-group: 16px;
+  --node-gap-section: 24px;
+  --node-ink: #172b42;
+  --node-muted: #526174;
+  --node-accent: #245b94;
+  --node-line: #dce3eb;
+  display: grid;
+  gap: var(--node-gap-section);
+  color: var(--node-ink);
+}
+.admin-app .admin-nodes ::selection { color: #102a43; background: #c9def2; }
+.admin-app .admin-nodes :focus-visible { outline-color: var(--node-accent); }
+.admin-app .node-secondary { color: var(--node-muted); font-size: 12px; font-weight: 400; }
+.admin-app .node-comparison,
+.admin-app .node-detail { min-width: 0; background: #fff; border: 1px solid var(--node-line); border-radius: 10px; }
+.admin-app .node-comparison-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; padding: 16px 20px; }
+.admin-app .node-comparison-heading h2 { font-size: 16px; }
+.admin-app .node-comparison-heading > span { color: var(--node-muted); font-size: 12px; }
+.admin-app .node-comparison-scroll { overflow-x: auto; border-radius: 0 0 10px 10px; }
+.admin-app .node-comparison-table { width: 100%; min-width: 800px; border-collapse: collapse; text-align: left; table-layout: fixed; }
+.admin-app .node-comparison-table th,
+.admin-app .node-comparison-table td { padding: 14px 20px; vertical-align: middle; border-top: 1px solid var(--node-line); }
+.admin-app .node-comparison-table thead th { padding-block: 10px; background: #f6f8fb; color: var(--node-muted); font-size: 12px; font-weight: 500; }
+.admin-app .node-comparison-table th:first-child { width: 174px; }
+.admin-app .node-comparison-table th:nth-child(2) { width: 120px; }
+.admin-app .node-comparison-table tbody tr[data-selected="true"] { background: #f0f5fa; }
+.admin-app .node-comparison-table tbody tr:hover { background: #f6f8fb; }
+.admin-app .node-comparison-table tbody tr[data-selected="true"]:hover { background: #e9f1f8; }
+.admin-app .node-comparison-table td > strong { font-size: 15px; white-space: nowrap; }
+.admin-app .node-comparison-table td > small { display: block; margin-top: 4px; }
+.admin-app .node-select { display: grid; gap: 6px; width: 100%; padding: 0; text-align: left; color: var(--node-ink); background: transparent; border: 0; border-radius: 3px; }
+.admin-app .node-select > span:first-child { display: flex; align-items: center; gap: 8px; }
+.admin-app .node-select[aria-pressed="true"] > span:first-child { color: var(--node-accent); }
+.admin-app .node-select strong { font-size: 14px; }
+.admin-app .node-row-alert { display: block; margin-top: 6px; color: #835815; font-size: 11px; font-weight: 500; }
+.admin-app .node-status { display: inline-flex; align-items: center; gap: 6px; width: fit-content; color: #256343; font-size: 12px; font-weight: 500; white-space: nowrap; }
+.admin-app .node-status i,
+.admin-app .node-gpu-state i { display: inline-block; width: 6px; height: 6px; flex-shrink: 0; background: currentColor; border-radius: 50%; }
+.admin-app .node-status.is-stale { color: #835815; }
+.admin-app .node-status.is-offline { color: #a83330; }
+.admin-app .node-meter { min-width: 0; }
+.admin-app .node-meter-label { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.admin-app .node-meter-label > span { color: var(--node-muted); font-size: 13px; }
+.admin-app .node-meter-label > strong { font-size: 16px; font-weight: 600; white-space: nowrap; }
+.admin-app .node-meter-track { height: 5px; overflow: hidden; background: #e7edf3; border-radius: 3px; }
+.admin-app .node-meter-track > span { display: block; height: 100%; background: #527ba4; border-radius: inherit; }
+.admin-app .node-meter.is-warning .node-meter-track > span { background: #ab721d; }
+.admin-app .node-meter > small { display: block; margin-top: 8px; color: var(--node-muted); font-size: 12px; overflow-wrap: anywhere; }
+.admin-app .node-comparison-table .node-meter-label > span { display: none; }
+.admin-app .node-comparison-table .node-meter-label { justify-content: flex-start; margin-bottom: 6px; }
+.admin-app .node-comparison-table .node-meter-label > strong { font-size: 14px; }
+.admin-app .node-comparison-table .node-meter-track { max-width: 112px; height: 4px; }
+.admin-app .node-detail { padding: 24px; }
+.admin-app .node-detail-heading { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px 20px; margin-bottom: 24px; }
+.admin-app .node-detail-heading h2 { display: flex; align-items: center; gap: 12px; font-size: 22px; line-height: 1.3; }
+.admin-app .node-detail-heading p { margin-top: 6px; color: var(--node-muted); font-size: 12px; }
+.admin-app .node-hardware { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 16px 24px; padding-bottom: 20px; border-bottom: 1px solid var(--node-line); }
+.admin-app .node-hardware > div { min-width: 0; }
+.admin-app .node-hardware dt { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; color: var(--node-muted); font-size: 12px; }
+.admin-app .node-hardware dd { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.admin-app .node-hardware small { display: block; margin-top: 4px; color: var(--node-muted); font-size: 12px; font-weight: 400; }
+.admin-app .node-detail-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr); gap: 32px; margin-top: 24px; }
+.admin-app .node-resources { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+.admin-app .node-section-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; margin-bottom: 16px; }
+.admin-app .node-section-heading h3 { display: flex; align-items: center; gap: 8px; font-size: 15px; }
+.admin-app .node-section-heading > span { font-size: 12px; color: var(--node-muted); }
+.admin-app .node-resource-meters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.admin-app .node-resource-meters .node-meter-label { flex-wrap: wrap; gap: 4px 8px; }
+.admin-app .node-gpu-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.admin-app .node-gpu { display: grid; grid-template-rows: auto auto minmax(28px, auto); align-content: start; gap: 6px; min-width: 0; padding: 12px; background: #f6f8fa; border-radius: 6px; }
+.admin-app .node-gpu > strong { font-size: 13px; font-weight: 600; white-space: nowrap; }
+.admin-app .node-gpu-state { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #2b5c91; }
+.admin-app .node-gpu[data-state="available"] .node-gpu-state { color: #256343; }
+.admin-app .node-gpu:is([data-state="error"], [data-state="repair_required"]) .node-gpu-state { color: #a83330; }
+.admin-app .node-gpu:is([data-state="creating"], [data-state="stopping"]) .node-gpu-state { color: #835815; }
+.admin-app .node-gpu-assignment { display: flex; align-items: center; min-height: 28px; min-width: 0; }
+.admin-app .node-gpu-assignment > span { color: var(--node-muted); font-size: 12px; }
+.admin-app .node-instance-link { display: inline-flex; align-items: center; gap: 3px; min-height: 28px; padding: 0; background: transparent; border: 0; color: var(--node-accent); font-size: 12px; text-align: left; text-decoration: underline; text-underline-offset: 3px; overflow-wrap: anywhere; }
+.admin-app .node-instance-link:hover { color: #14395e; }
+.admin-app .node-storage { padding-top: 20px; border-top: 1px solid var(--node-line); }
+.admin-app .node-storage-details { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px 20px; margin-top: 12px; }
+.admin-app .node-storage-details > div { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 12px; }
+.admin-app .node-storage-details dt { color: var(--node-muted); }
+.admin-app .node-energy { min-width: 0; padding-left: 32px; border-left: 1px solid var(--node-line); }
+.admin-app .node-power-readings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.admin-app .node-power-readings > div { min-width: 0; }
+.admin-app .node-power-readings span { display: block; color: var(--node-muted); font-size: 13px; }
+.admin-app .node-power-readings strong { display: block; margin-block: 4px; font-size: 26px; font-weight: 600; line-height: 1.35; white-space: nowrap; letter-spacing: -.02em; }
+.admin-app .node-power-readings small { display: block; color: var(--node-muted); font-size: 12px; }
+.admin-app .node-chart { margin: 20px 0 16px; }
+.admin-app .node-chart-plot { display: grid; grid-template-columns: 36px minmax(0, 1fr); gap: 8px; }
+.admin-app .node-chart svg { display: block; width: 100%; height: 180px; }
+.admin-app .node-chart-y { position: relative; color: var(--node-muted); font-size: 11px; }
+.admin-app .node-chart-y > span { position: absolute; right: 0; transform: translateY(-50%); }
+.admin-app .node-chart-y > .node-chart-unit { top: 0; left: 0; transform: none; }
+.admin-app .node-chart-times { display: flex; justify-content: space-between; margin-left: 44px; color: var(--node-muted); font-size: 11px; }
+.admin-app .node-chart line { stroke: #e4e9ef; stroke-width: 1; }
+.admin-app .node-chart-line { stroke: var(--node-accent); stroke-width: 1.8; fill: none; vector-effect: non-scaling-stroke; }
+.admin-app .node-chart figcaption { margin-top: 6px; color: var(--node-muted); font-size: 12px; }
+.admin-app .node-chart-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; min-height: 180px; color: var(--node-muted); }
+.admin-app .node-chart-empty small { font-size: 12px; }
+.admin-app .node-costs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; padding-block: 16px; border-block: 1px solid var(--node-line); }
+.admin-app .node-costs > div { min-width: 0; }
+.admin-app .node-costs span { display: block; color: var(--node-muted); font-size: 12px; }
+.admin-app .node-costs strong { display: block; margin-block: 4px; font-size: 19px; font-weight: 600; overflow-wrap: anywhere; }
+.admin-app .node-costs small { display: block; color: var(--node-muted); font-size: 11px; }
+.admin-app .node-energy-note { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; margin-top: 12px; color: var(--node-muted); font-size: 11px; }
+.admin-app .node-diagnostics { margin-top: 12px; color: var(--node-muted); font-size: 12px; }
+.admin-app .node-diagnostics summary { display: flex; align-items: center; gap: 6px; width: fit-content; min-height: 32px; cursor: pointer; list-style: none; border-radius: 3px; }
+.admin-app .node-diagnostics summary::-webkit-details-marker { display: none; }
+.admin-app .node-diagnostics[open] summary svg { transform: rotate(180deg); }
+.admin-app .node-diagnostics dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; margin-top: 8px; }
+.admin-app .node-diagnostics dd { color: var(--node-ink); overflow-wrap: anywhere; }
+.admin-app .node-inline-warning { display: flex; align-items: flex-start; gap: 8px; margin-top: 12px; color: #805217; font-size: 12px; }
+.admin-app .node-inline-warning svg { flex-shrink: 0; margin-top: 2px; }
+.admin-app .admin-nodes > .node-inline-warning { margin: 0; }
+.admin-app .node-empty { display: grid; justify-items: center; gap: 12px; padding: 48px 24px; color: var(--admin-muted); }
+.admin-app .node-empty h2 { font-size: 18px; }
+@media (min-width: 2000px) {
+  .admin-app .node-detail-columns { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .admin-app .node-gpu-grid { grid-template-columns: repeat(8, minmax(0, 1fr)); }
+}
+@media (max-width: 1250px) {
+  .admin-app .node-detail-columns { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+  .admin-app .node-energy { padding: 24px 0 0; border-left: 0; border-top: 1px solid var(--node-line); }
+  .admin-app .node-gpu-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .admin-app .node-chart { max-width: 900px; }
+}
+@media (max-width: 800px) {
+  .admin-app .node-detail { padding: 20px; }
+  .admin-app .node-hardware { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .admin-app .node-hardware > div:first-child { grid-column: 1 / -1; }
+}
+@media (max-width: 560px) {
+  .admin-app .admin-nodes { gap: 16px; }
+  .admin-app .node-comparison-heading { padding: 16px; }
+  .admin-app .node-comparison-table,
+  .admin-app .node-comparison-table tbody { display: block; min-width: 0; }
+  .admin-app .node-comparison-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .admin-app .node-comparison-table tbody tr { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 16px; gap: 12px 16px; border-top: 1px solid var(--node-line); }
+  .admin-app .node-comparison-table th,
+  .admin-app .node-comparison-table td { display: block; padding: 0; border: 0; width: auto !important; }
+  .admin-app .node-comparison-table tbody th { grid-column: 1 / -1; }
+  .admin-app .node-select { display: flex; justify-content: space-between; align-items: center; min-height: 32px; }
+  .admin-app .node-comparison-table td::before { content: attr(data-label); display: block; margin-bottom: 4px; color: var(--node-muted); font-size: 11px; }
+  .admin-app .node-comparison-table td > strong { font-size: 14px; }
+  .admin-app .node-detail { padding: 16px; }
+  .admin-app .node-detail-heading { margin-bottom: 20px; }
+  .admin-app .node-detail-heading h2 { font-size: 20px; }
+  .admin-app .node-resource-meters { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .admin-app .node-resource-meters .node-meter-label { flex-wrap: nowrap; }
+  .admin-app .node-gpu-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .admin-app .node-costs { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .admin-app .node-costs > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; align-items: center; }
+  .admin-app .node-costs strong { grid-column: 2; grid-row: 1 / 3; margin: 0; font-size: 18px; }
+  .admin-app .node-chart svg { height: 150px; }
+  .admin-app .node-power-readings strong { font-size: 23px; }
+}
+@media (pointer: coarse) {
+  .admin-app .node-select,
+  .admin-app .node-instance-link,
+  .admin-app .node-diagnostics summary { min-height: 44px; }
+}

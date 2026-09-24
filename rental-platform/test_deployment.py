@@ -182,6 +182,39 @@ PY
     rollback_release "$requested"
     [[ -f "$ROOT/old-version" && -f "$BASE/active" ]]
   fi
+elif [[ "$QA_MODE" == gpu-rollback || "$QA_MODE" == gpu-rollback-empty ]]; then
+  install_release
+  requested=$RECOVERY_BACKUP
+  python3 - "$DATA/state/core.sqlite3" "$QA_MODE" <<'PY'
+from pathlib import Path
+import sqlite3,sys
+path=Path(sys.argv[1]); path.unlink()
+with sqlite3.connect(path) as db:
+    db.execute('CREATE TABLE instances(gpu_count INTEGER, state TEXT)')
+    db.execute('INSERT INTO instances VALUES (?,?)',(4,'stopped' if sys.argv[2]=='gpu-rollback' else 'deleted'))
+PY
+  if [[ "$QA_MODE" == gpu-rollback ]]; then
+    if rollback_release "$requested"; then exit 90; fi
+    if restore_backup "$requested"; then exit 91; fi
+    [[ -f "$ROOT/new-version" && -f "$BASE/active" ]]
+  else
+    PROGRAM_CHANGED=0
+    rollback_release "$requested"
+    [[ -f "$ROOT/old-version" && -f "$BASE/active" ]]
+  fi
+elif [[ "$QA_MODE" == gift-rollback ]]; then
+  install_release
+  requested=$RECOVERY_BACKUP
+  python3 - "$DATA/state/core.sqlite3" <<'PY'
+from pathlib import Path
+import sqlite3,sys
+path=Path(sys.argv[1]); path.unlink()
+with sqlite3.connect(path) as db:
+    db.execute('CREATE TABLE instances(gpu_count INTEGER, eight_card_gift_disk INTEGER, state TEXT)')
+    db.execute("INSERT INTO instances VALUES (4,1,'stopped')")
+PY
+  if rollback_release "$requested"; then exit 90; fi
+  [[ -f "$ROOT/new-version" && -f "$BASE/active" ]]
 elif [[ "$QA_MODE" == migrated-rollback ]]; then
   install_release
   requested=$RECOVERY_BACKUP
@@ -220,11 +253,12 @@ class DeploymentTests(unittest.TestCase):
         # already-compatible code. Only the multi-node rollback cases below
         # model a single-node backup, using a real SQLite database.
         (self.base / "program/remote_backend.py").write_text("prior compatible transport")
+        (self.base / "program/gpu_plans.py").write_text("prior four-card-compatible code")
         (self.base / "service.unit").write_text("old unit")
         (self.base / "active").touch()
         (self.base / "data/state/core.sqlite3").write_text("old-business-events\n")
         release = self.base / "release"
-        for name in ("core.py", "recharge_codes.py", "backend.py", "shared_storage.py", "remote_backend.py", "shared-storage/1cat-mount-shared", "shared-storage/1cat-shared-storage.service", "server.py", "adminctl.py",
+        for name in ("core.py", "placement.py", "gpu_plans.py", "recharge_codes.py", "backend.py", "shared_storage.py", "remote_backend.py", "host_metrics.py", "shared-storage/1cat-mount-shared", "shared-storage/1cat-shared-storage.service", "server.py", "adminctl.py",
                      "deploy-production.sh", "prepare-image.sh", "1cat-rental.service",
                      "public/index.html", "public/rental/index.html", "new-version"):
             (release / name).parent.mkdir(parents=True, exist_ok=True)
@@ -238,6 +272,8 @@ class DeploymentTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def invoke(self, mode):
+        if mode in ('gpu-rollback','gpu-rollback-empty'):
+            (self.base / 'program/gpu_plans.py').unlink()
         if mode in ('multinode-rollback','multinode-rollback-empty'):
             (self.base / 'program/remote_backend.py').unlink()
         env = {key: value for key, value in os.environ.items()
@@ -267,9 +303,21 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual((backups[0] / "complete").read_text(), "v2\n")
         self.assertEqual((backups[0] / "service.unit").read_text(), "old unit")
         self.assertEqual((backups[0] / "state/core.sqlite3").read_text(), "old-business-events\n")
+
+    def test_four_card_instances_block_incompatible_rollback(self):
+        self.assertEqual(self.invoke('gpu-rollback').returncode,0,self.last_output)
+        self.assertIn('four-card instances exist', self.last_output)
+
+    def test_no_four_card_instances_allow_code_rollback(self):
+        self.assertEqual(self.invoke('gpu-rollback-empty').returncode,0,self.last_output)
         if os.name != "nt":
             self.assertEqual((self.base / "program/server.py").stat().st_mode & 0o777, 0o644)
             self.assertEqual((self.base / "program/deploy-production.sh").stat().st_mode & 0o777, 0o755)
+
+    def test_downgraded_eight_card_gift_blocks_incompatible_controller_rollback(self):
+        self.assertEqual(self.invoke('gift-rollback').returncode, 0, self.last_output)
+        self.assertIn('backup controller would omit the 600 GiB disk', self.last_output)
+        self.assertTrue((self.base / 'program/new-version').exists())
 
     def test_staging_and_permission_failures_never_stop_old_service(self):
         for mode in ("stage-fail", "permissions-fail"):
@@ -282,6 +330,12 @@ class DeploymentTests(unittest.TestCase):
         (self.base / 'release/remote_backend.py').unlink()
         self.assertNotEqual(self.invoke('ok').returncode,0)
         self.assertIn('release file missing: remote_backend.py',self.last_output)
+        self.assert_old_healthy()
+
+    def test_missing_placement_dependency_rejected_before_stopping(self):
+        (self.base / 'release/placement.py').unlink()
+        self.assertNotEqual(self.invoke('ok').returncode, 0)
+        self.assertIn('release file missing: placement.py', self.last_output)
         self.assert_old_healthy()
 
     def test_backup_failure_restarts_old_service_without_replacement(self):
