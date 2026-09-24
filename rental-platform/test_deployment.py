@@ -303,6 +303,8 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual((backups[0] / "complete").read_text(), "v2\n")
         self.assertEqual((backups[0] / "service.unit").read_text(), "old unit")
         self.assertEqual((backups[0] / "state/core.sqlite3").read_text(), "old-business-events\n")
+        if os.name != "nt":
+            self.assertEqual((self.base / "program/deploy-production.sh").stat().st_mode & 0o777, 0o755)
 
     def test_four_card_instances_block_incompatible_rollback(self):
         self.assertEqual(self.invoke('gpu-rollback').returncode,0,self.last_output)
@@ -312,7 +314,9 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(self.invoke('gpu-rollback-empty').returncode,0,self.last_output)
         if os.name != "nt":
             self.assertEqual((self.base / "program/server.py").stat().st_mode & 0o777, 0o644)
-            self.assertEqual((self.base / "program/deploy-production.sh").stat().st_mode & 0o777, 0o755)
+        # This fixture deliberately models a legacy installation without the
+        # deployment script; successful rollback must restore that absence.
+        self.assertFalse((self.base / "program/deploy-production.sh").exists())
 
     def test_downgraded_eight_card_gift_blocks_incompatible_controller_rollback(self):
         self.assertEqual(self.invoke('gift-rollback').returncode, 0, self.last_output)
