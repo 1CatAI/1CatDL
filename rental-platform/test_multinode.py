@@ -27,15 +27,14 @@ class SchedulingTests(unittest.TestCase):
     def order(self,owner,node):
         return self.core.order(owner,{},owner+'-'+node,node_id=node)
 
-    def test_same_slot_number_is_independent_but_owner_limit_is_global(self):
+    def test_same_slot_number_is_independent_and_default_limit_is_unlimited(self):
         a,b = self.order('alice',LOCAL_NODE),self.order('bobby','G2-003')
         self.assertEqual(self.core.action('alice',a['id'],'start')['slot'],1)
         self.assertEqual(self.core.action('bobby',b['id'],'start')['slot'],1)
         c = self.order('alice','G2-003')
-        with self.assertRaisesRegex(RuntimeError,'one GPU'):
-            self.core.action('alice',c['id'],'start')
+        self.core.action('alice',c['id'],'start')
         self.assertEqual(self.core.metrics()['capacity']['slots'],16)
-        self.assertEqual(self.core.metrics('G2-003')['used']['cpu'],16)
+        self.assertEqual(self.core.metrics('G2-003')['used']['cpu'],32)
 
     def test_home_node_is_durable_and_idempotency_does_not_rehome(self):
         row = self.order('alice','G2-003')
@@ -75,6 +74,7 @@ class SchedulingTests(unittest.TestCase):
         self.assertEqual(before-self.core.profile('alice')['balanceCents'],400)
 
     def test_concurrent_cross_node_start_for_same_owner_has_one_winner(self):
+        self.core.set_customer_gpu_limit('operator', 'alice', 1, None)
         rows = [self.order('alice',LOCAL_NODE),self.order('alice','G2-003')]
         barrier = threading.Barrier(2)
         results = []

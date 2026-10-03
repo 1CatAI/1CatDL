@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -73,6 +74,17 @@ class BackendStorageTests(unittest.TestCase):
         self.assertFalse(data_directory.exists())
         self.assertFalse((self.backend.root / "retired" / "3").exists())
         self.assertFalse((self.backend.data_root / "retired" / "3").exists())
+
+    def test_stop_uses_acpi_and_timeout_defers_to_power_state_check(self):
+        instance = {"id": "3"}
+        with patch.object(self.backend, "state", return_value="running"), \
+             patch.object(self.backend, "virsh", side_effect=subprocess.TimeoutExpired("virsh", 15)) as virsh:
+            self.backend.stop(instance)
+        virsh.assert_called_once_with("shutdown", self.backend.name(instance), "--mode", "acpi", timeout=15)
+        with patch.object(self.backend, "state", return_value="off"), \
+             patch.object(self.backend, "virsh") as virsh:
+            self.backend.stop(instance)
+        virsh.assert_not_called()
 
     def test_new_guest_has_gaudi_device_groups(self):
         with patch("backend.command"), patch("backend.shutil.copy2"), \

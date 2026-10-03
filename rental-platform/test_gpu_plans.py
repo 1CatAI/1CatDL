@@ -79,10 +79,11 @@ class FourCardCoreTests(unittest.TestCase):
         self.assertLessEqual(len(held),8)
         self.assertTrue(failures)
 
-    def test_single_customer_limit_global_but_many_headless(self):
+    def test_configured_single_customer_limit_global_but_many_headless(self):
+        self.core.set_customer_gpu_limit('operator', 'alice', 1, None)
         first=self.start('alice')
         other=self.order('alice',1,node='G2-003')
-        with self.assertRaisesRegex(RuntimeError,'one GPU'): self.core.action('alice',other['id'],'start')
+        with self.assertRaisesRegex(RuntimeError,'GPU 实例并发配额已满'): self.core.action('alice',other['id'],'start')
         for key in ('headless-a','headless-b'):
             self.start('alice',4,mode='headless',key=key)
         self.assertEqual(self.core.metrics()['active_headless'],2)

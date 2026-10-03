@@ -54,7 +54,7 @@ export function CustomerWorkspace({ account, state, tab, loading, hourlyCost, on
       {account.role === 'customer' && tab !== 'wallet' && <div className="customer-contact-strip">{contact}</div>}
       {tab === 'create' && <CreateInstance state={state} loading={loading} options={creation} onRecharge={() => onNavigate('wallet')} />}
       {children}
-      <footer className="customer-footer"><span><ShieldCheck size={14} />GPU 每人同时 1 台 · 无头可同时多台</span><span>关机 48 小时后自动释放全部磁盘</span><span>{state.updatedAt ? `同步于 ${new Date(state.updatedAt).toLocaleTimeString('zh-CN', { hour12: false })} · 5 秒自动同步` : '正在连接资源调度器'} · 后台暂停刷新</span></footer>
+      <footer className="customer-footer"><span><ShieldCheck size={14} />GPU 实例配额：{account.gpuInstanceLimit == null ? '不限' : `${account.gpuActiveCount ?? 0}/${account.gpuInstanceLimit} 台`} · 无头模式不占配额</span><span>关机 48 小时后自动释放全部磁盘</span><span>{state.updatedAt ? `同步于 ${new Date(state.updatedAt).toLocaleTimeString('zh-CN', { hour12: false })} · 5 秒自动同步` : '正在连接资源调度器'} · 后台暂停刷新</span></footer>
     </div>
   </main>;
 }

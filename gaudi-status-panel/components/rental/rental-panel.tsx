@@ -1,13 +1,13 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { BrandLogo } from '@/components/brand-logo';
 import { AdminWorkspace, AdminPagination, type AdminAccountProps } from './admin-workspace';
 import { gpuCapacityReason } from './gpu-plans';
 import { CustomerWorkspace } from './customer-workspace';
 import { customerSearch, filterCustomerInstances, readCustomerTab, type CustomerFilter } from './customer-model';
 import { PlacementSettings, type PlacementPolicy, type PlacementQuote } from './placement-settings';
-import { currentRequestIdentity, resetRequestIdentity, notifyUnauthorized } from './admin-model';
+import { currentRequestIdentity, resetRequestIdentity, notifyUnauthorized, gpuInstanceQuotaReason } from './admin-model';
 import { withRequestTimeout } from '../../lib/request-timeout.mjs';
 import {
   ArrowRight,
@@ -63,6 +63,7 @@ export type RentalInstance = {
   storageCnyPerDay?: number;
   connectivity?: 'ready' | 'pending';
   owner?: string;
+  ownerGpuInstanceLimit?: number | null;
   observedAt?: string;
 };
 
@@ -72,6 +73,8 @@ export type RentalAccount = {
   balanceCents: number;
   createdAt: string;
   lastActivityAt: string | null;
+  gpuInstanceLimit?: number | null;
+  gpuActiveCount?: number;
 };
 
 export type HostTelemetry = {
@@ -135,7 +138,7 @@ export type RentalState = {
   storage?: { totalGiB: number; usedGiB: number; freeGiB: number; safetyGiB: number; reservedGiB: number; budgetGiB: number; lowSpace: boolean; mode: string };
 };
 
-export type AdminCustomer = { name: string; balanceCents: number; createdAt: string; deletedAt: string | null; deletedBy: string | null; instanceCount: number };
+export type AdminCustomer = { name: string; balanceCents: number; createdAt: string; deletedAt: string | null; deletedBy: string | null; instanceCount: number; gpuInstanceLimit: number | null; gpuActiveCount: number };
 
 const initialState: RentalState = {
   service: 'degraded',
@@ -335,7 +338,7 @@ export function RentalPanel() {
   const eightCreateBalanceCents = state.billing.gpuPlans?.find(plan => plan.gpuCount === 8)?.minCreateBalanceExclusiveCents ?? 10000;
   const canOrder = state.service !== 'maintenance' && !!selectedPlacement?.allowed && !!selectedPlacement?.createAvailable && !submitting
     && (gpuCount !== 8 || state.account.balanceCents > eightCreateBalanceCents);
-  const activeInstance = state.instances.find((row) => row.mode !== 'headless' && ['creating', 'starting', 'running', 'stopping', 'repair_required'].includes(row.state));
+  const gpuActiveCount = state.account.gpuActiveCount ?? state.instances.filter(row => row.slot > 0).length;
   const hourlyCost = state.instances.reduce((sum, row) => sum + (['running', 'stopping', 'repair_required'].includes(row.state) ? row.rateCentsPerHour ?? 0 : 0) + (row.storageCnyPerDay ?? 0) * 100 / 24, 0);
   const startReason = (instance: RentalInstance, selected: InstanceMode) => {
     const node = state.nodes?.find((item) => item.id === (instance.nodeId || 'G2-002'));
@@ -345,7 +348,8 @@ export function RentalPanel() {
     if (!node && state.service !== 'ready') return state.serviceMessage;
     if (instance.gpuCount !== 8 && state.account.balanceCents <= 0) return '余额不足，请先充值';
     if (selected === 'headless') return (node?.headlessAvailable ?? state.headless?.available ?? 0) <= 0 ? '所属节点无头资源不足' : '';
-    if (activeInstance && activeInstance.id !== instance.id) return '请先关闭当前 GPU 实例';
+    const quotaReason = gpuInstanceQuotaReason(state.account.gpuInstanceLimit, gpuActiveCount);
+    if (quotaReason) return quotaReason;
     return gpuCapacityReason(state, instance.nodeId, instance.gpuCount ?? 1);
   };
   const estimatedHours = hourlyCost > 0 ? state.account.balanceCents / hourlyCost : null;
@@ -590,6 +594,9 @@ function AdminAccountPanel({ active, revision: externalRevision, query, status, 
   const inFlight = useRef(false);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
   const [confirmation, setConfirmation] = useState<{ customer: AdminCustomer; action: 'delete' | 'restore' } | null>(null);
+  const [editingCustomer, setEditingCustomer] = useState<AdminCustomer | null>(null);
+  const [quotaMode, setQuotaMode] = useState<'unlimited' | 'limited'>('unlimited');
+  const [quotaValue, setQuotaValue] = useState('1');
 
   useEffect(() => {
     if (!active) return;
@@ -623,6 +630,31 @@ function AdminAccountPanel({ active, revision: externalRevision, query, status, 
       inFlight.current = false; setBusy(false);
     }
   };
+  const editQuota = (customer: AdminCustomer) => {
+    setEditingCustomer(customer);
+    setQuotaMode(customer.gpuInstanceLimit == null ? 'unlimited' : 'limited');
+    setQuotaValue(String(customer.gpuInstanceLimit ?? 1));
+    setMessage(null);
+  };
+  const saveQuota = async () => {
+    if (!editingCustomer || inFlight.current) return;
+    const limit = quotaMode === 'unlimited' ? null : /^\d+$/.test(quotaValue) ? Number(quotaValue) : NaN;
+    if (limit !== null && (!Number.isInteger(limit) || limit < 0 || limit > 10000)) {
+      setMessage({ ok: false, text: 'GPU 并发上限请输入 0–10000 的整数。' }); return;
+    }
+    inFlight.current = true; setBusy(true); setMessage(null);
+    try {
+      await rentalRequest(`/api/admin/customers/${encodeURIComponent(editingCustomer.name)}/gpu-limit`, {
+        method: 'POST', body: JSON.stringify({ limit, expectedLimit: editingCustomer.gpuInstanceLimit }),
+      });
+      setMessage({ ok: true, text: `${editingCustomer.name} 的 GPU 并发配额已设为${limit === null ? '不限' : `${limit} 台`}。` });
+      setEditingCustomer(null); onChanged();
+    } catch (error) {
+      setMessage({ ok: false, text: error instanceof Error ? error.message : '保存 GPU 配额失败' });
+    } finally {
+      setRevision(value => value + 1); inFlight.current = false; setBusy(false);
+    }
+  };
   const visible = customers.filter((customer) => customer.name.toLowerCase().includes(query.trim().toLowerCase()));
   const pageCount = Math.max(1, Math.ceil(visible.length / 15));
   const currentPage = Math.min(page, pageCount);
@@ -630,11 +662,15 @@ function AdminAccountPanel({ active, revision: externalRevision, query, status, 
   return <section className="rental-card rental-account-card" aria-label="客户账户">
     <div className="rental-list-tools"><label><Search size={14} /><input aria-label="搜索客户账户" placeholder="搜索账户名" value={query} onChange={(event) => { onQuery(event.target.value); setPage(1); }} /></label><select aria-label="账户状态" value={status} disabled={busy} onChange={(event) => { onStatus(event.target.value); setPage(1); setLoading(true); setMessage(null); }}><option value="active">正常账户</option><option value="deleted">已删除</option><option value="all">全部账户</option></select><button className="admin-link" onClick={() => { onReset(); setPage(1); }}>重置筛选</button></div>
     {message && <div role={message.ok ? 'status' : 'alert'} className={`rental-account-message ${message.ok ? 'rental-code-success' : 'rental-text-error'}`}>{message.text}</div>}
-    <section className="rental-table-wrap" aria-label="客户列表，可横向滚动"><table className="rental-table"><thead><tr><th>账户</th><th>余额</th><th>保留实例</th><th>状态</th><th>注册 / 删除时间</th><th>操作</th></tr></thead><tbody>
-      {loading ? <tr><td colSpan={6}>正在读取账户…</td></tr> : visible.length === 0 ? <tr><td colSpan={6}>{query ? '没有匹配的账户' : status === 'deleted' ? '暂无已删除账户' : '暂无客户账户'}</td></tr> : paged.map((customer) => <tr key={customer.name}>
-        <td><strong>{customer.name}</strong></td><td>{formatMoney(customer.balanceCents)}</td><td><button className="admin-link" aria-label={`查看 ${customer.name} 的实例`} onClick={() => onInstances(customer.name)}>{customer.instanceCount} 台</button></td><td><span className={`rental-account-status ${customer.deletedAt ? 'is-deleted' : ''}`}>{customer.deletedAt ? '已删除' : '正常'}</span></td><td>{formatDate(customer.createdAt)}{customer.deletedAt && <small className="rental-account-meta">删除于 {formatDate(customer.deletedAt)} · {customer.deletedBy}</small>}</td>
+    <section className="rental-table-wrap" aria-label="客户列表，可横向滚动"><table className="rental-table"><thead><tr><th>账户</th><th>余额</th><th>保留实例</th><th>GPU 并发</th><th>状态</th><th>注册 / 删除时间</th><th>操作</th></tr></thead><tbody>
+      {loading ? <tr><td colSpan={7}>正在读取账户…</td></tr> : visible.length === 0 ? <tr><td colSpan={7}>{query ? '没有匹配的账户' : status === 'deleted' ? '暂无已删除账户' : '暂无客户账户'}</td></tr> : paged.map((customer) => <Fragment key={customer.name}><tr>
+        <td><strong>{customer.name}</strong></td><td>{formatMoney(customer.balanceCents)}</td><td><button className="admin-link" aria-label={`查看 ${customer.name} 的实例`} onClick={() => onInstances(customer.name)}>{customer.instanceCount} 台</button></td><td><span className="admin-quota-count">{customer.gpuActiveCount} / {customer.gpuInstanceLimit == null ? '不限' : customer.gpuInstanceLimit}</span>{!customer.deletedAt && <button className="admin-link" disabled={busy} aria-label={`设置 ${customer.name} 的 GPU 并发配额`} aria-expanded={editingCustomer?.name === customer.name} onClick={() => editQuota(customer)}>设置</button>}</td><td><span className={`rental-account-status ${customer.deletedAt ? 'is-deleted' : ''}`}>{customer.deletedAt ? '已删除' : '正常'}</span></td><td>{formatDate(customer.createdAt)}{customer.deletedAt && <small className="rental-account-meta">删除于 {formatDate(customer.deletedAt)} · {customer.deletedBy}</small>}</td>
         <td><div className="admin-row-actions">{!customer.deletedAt && <button className="rental-small-button" disabled={busy} aria-label={`充值给 ${customer.name}`} onClick={() => onRecharge(customer)}>充值</button>}<button className="admin-link" onClick={() => onLedger(customer.name)} aria-label={`查看 ${customer.name} 的账单`}>账单</button>{customer.deletedAt ? <button className="rental-small-button" disabled={busy} aria-label={`恢复账户 ${customer.name}`} onClick={() => setConfirmation({ customer, action: 'restore' })}>恢复</button> : <details className="admin-more"><summary aria-label={`账户 ${customer.name} 更多操作`}>更多</summary><div><button className="admin-danger" disabled={busy || customer.instanceCount > 0} title={customer.instanceCount > 0 ? '请先释放该账户全部实例，包括已关机实例' : '可恢复删除，账单与余额保留'} aria-label={`删除账户 ${customer.name}`} onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); setConfirmation({ customer, action: 'delete' }); }}>删除账户</button>{customer.instanceCount > 0 && <small>须先释放全部实例</small>}</div></details>}</div></td>
-      </tr>)}
+      </tr>{editingCustomer?.name === customer.name && !customer.deletedAt && <tr className="admin-quota-editor-row"><td colSpan={7}><form className="admin-quota-editor" onSubmit={event => { event.preventDefault(); void saveQuota(); }} aria-label={`${customer.name} GPU 并发配额`}>
+        <div><strong>设置 {customer.name} 的 GPU 并发配额</strong><p>按同时占用 GPU 的实例台数计算，1/4/8 卡各算 1 台；无头实例不占配额。降低上限不会关闭已运行实例。</p></div>
+        <div className="admin-quota-options"><label><input type="radio" name={`quota-${customer.name}`} checked={quotaMode === 'unlimited'} disabled={busy} onChange={() => setQuotaMode('unlimited')} />不限</label><label><input type="radio" name={`quota-${customer.name}`} checked={quotaMode === 'limited'} disabled={busy} onChange={() => setQuotaMode('limited')} />最多 <input type="number" min="0" max="10000" step="1" value={quotaValue} disabled={busy || quotaMode !== 'limited'} aria-label="GPU 并发台数" onChange={event => setQuotaValue(event.target.value)} /> 台</label></div>
+        <div className="admin-quota-actions"><button className="rental-small-button" type="submit" disabled={busy || (quotaMode === 'limited' && (!/^\d+$/.test(quotaValue) || Number(quotaValue) > 10000))}>{busy ? '保存中…' : '保存配额'}</button><button className="admin-link" type="button" disabled={busy} onClick={() => setEditingCustomer(null)}>取消</button></div>
+      </form></td></tr>}</Fragment>)}
     </tbody></table></section>
     <AdminPagination page={currentPage} pages={pageCount} total={visible.length} fullTotal={customers.length} onPage={setPage} />
     <details className="admin-help"><summary>账户删除规则</summary><p>删除会禁止登录并保留余额和历史账单，可恢复；须先释放全部实例，不会自动退款。</p></details>

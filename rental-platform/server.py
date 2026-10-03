@@ -263,6 +263,7 @@ class Service:
     def maintenance_loop(self):
         while not self.closed.is_set():
             try:
+                self.reconcile_orphan_domains()
                 self.reconcile_nodes()
                 self.reconcile_runtime()
                 self.core.bill_running()
@@ -272,6 +273,29 @@ class Service:
             except Exception as exc:
                 print(f"maintenance failed: {type(exc).__name__}: {exc}", flush=True)
             self.closed.wait(5)
+
+    def reconcile_orphan_domains(self):
+        """Reserve GPUs for running local domains missing from durable state."""
+        if SIMULATION or not self.local_node_id:
+            return
+        backend = self.backend.local if isinstance(self.backend, BackendRouter) else self.backend
+        if not isinstance(backend, LibvirtBackend):
+            return
+        try:
+            domain_ids = backend.running_instance_ids()
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+            print(f'orphan runtime scan failed: {type(exc).__name__}: {exc}', flush=True)
+            return
+        for instance_id in domain_ids:
+            try:
+                slots = backend.running_slots({'id': str(instance_id)})
+                adopted = self.core.reconcile_orphan_running(instance_id, slots, self.local_node_id)
+                if adopted:
+                    print(f'orphan runtime {instance_id} reconciled at slots {slots}', flush=True)
+            except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
+                # A conflict is a safety event, not a reason to release either
+                # side.  Keep both reservations and require operator review.
+                print(f'orphan runtime {instance_id} not reconciled: {type(exc).__name__}: {exc}', flush=True)
 
     @staticmethod
     def backend_instance(row):
@@ -724,6 +748,7 @@ class Service:
                 "computeCents": cost.get('computeCents', 0), "storageCents": row['storage_charged_cents'],
                 "storageCnyPerDay": round(row['data'] * self.core.pricing()['extraDataDiskCnyPerGiBDay'], 5),
                 "owner": row['owner'] if admin_view else None,
+                "ownerGpuInstanceLimit": row.get('owner_gpu_limit') if admin_view else None,
                 "message": message,
                 "sharedStorage": shared,
             })
@@ -997,6 +1022,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path == '/api/admin/placement-policy':
                 policy = SERVICE.core.set_placement_policy(owner, body.get('policy'), body.get('expected'))
                 self.json({'policy': policy, 'nodes': list(SERVICE.core.nodes)}); return
+            gpu_limit = re.fullmatch(r'/api/admin/customers/([a-zA-Z0-9][a-zA-Z0-9_-]{2,31})/gpu-limit', path)
+            if gpu_limit:
+                SERVICE.check_mutation()
+                if set(body) != {'limit', 'expectedLimit'}:
+                    raise ValueError('只接受 limit 和 expectedLimit 配置项')
+                result = SERVICE.core.set_customer_gpu_limit(owner, gpu_limit[1], body['limit'], body['expectedLimit'])
+                self.json({'ok': True, 'customer': result}, 200, set_cookie=cookie); return
             customer_action = re.fullmatch(r'/api/admin/customers/([a-zA-Z0-9][a-zA-Z0-9_-]{2,31})/(delete|restore)', path)
             if customer_action:
                 if customer_action[2] == 'delete':
@@ -1049,3 +1081,4 @@ if __name__ == '__main__':
     SERVICE = Service()
     print(f'1Cat rental HTTP listening on 127.0.0.1:{PORT} simulation={SIMULATION}',flush=True)
     ReusableServer(('127.0.0.1',PORT),Handler).serve_forever()
+

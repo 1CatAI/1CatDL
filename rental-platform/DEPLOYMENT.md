@@ -11,7 +11,7 @@
 | 固定计算规格 | 每台 1 张 Gaudi2、16 vCPU、62.5 GB（62,500 MB）内存、50 GiB 系统盘；客户只选择 0–200 GiB 数据盘 |
 | 开机计费 | 开机成功后创建 usage ledger，按服务器费率扣余额 |
 | 余额为零关机 | 后台结算将实例置为 stopping，后端确认关机并释放 GPU |
-| 多客户/多实例 | 停止实例不占 GPU；每客户最多 1 个运行实例，平台最多 8 个活动槽位 |
+| 多客户/多实例 | 停止且已释放 GPU 的实例不占配额；客户 GPU 并发默认不限，管理员可逐户设置；单节点最多 8 个活动 GPU 槽位 |
 | 资源不足 | SQLite 事务分配 8 个槽位，核算 CPU/内存与统一存储预留容量；另检查物理磁盘安全余量，失败返回 409 |
 | SSH 入口 | 2221–2228 本机转发端口接入现有 1CatTunnel 公网端口 |
 | 磁盘落盘 | 迁移完成后系统盘位于 Intel 的 `/mnt/nvme1/1cat-rental-system/instances`，数据盘位于 `/mnt/nvme1/1cat-rental-data/instances`；小体积控制状态、cloud-init 和 NVRAM 留原位 |
