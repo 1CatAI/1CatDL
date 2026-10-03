@@ -87,6 +87,45 @@ class LibvirtBackend:
         except (OSError, RuntimeError, subprocess.TimeoutExpired):
             return False
 
+    def running_instance_ids(self):
+        """Return rental instance IDs for running libvirt domains.
+
+        A storage cutover or an operator recovery can restart a domain after
+        the durable scheduler row was marked stopped.  The controller must
+        discover that mismatch before allocating the same PCI slot again.
+        """
+        names = self.virsh('list', '--name', timeout=5).splitlines()
+        result = []
+        for name in names:
+            match = re.fullmatch(r'cat-rental-([0-9]+)', name.strip())
+            if match:
+                result.append(int(match.group(1)))
+        return result
+
+    def running_slots(self, instance):
+        """Map the host PCI devices attached to a running domain to slot IDs."""
+        root = ET.fromstring(self.virsh('dumpxml', self.name(instance), timeout=10))
+        configured = {bdf.lower(): index for index, bdf in enumerate(self.config['bdfs'], 1)}
+        slots = []
+        for hostdev in root.findall(".//hostdev[@type='pci']"):
+            address = hostdev.find('./source/address')
+            if address is None:
+                raise RuntimeError('running rental domain has an incomplete PCI hostdev')
+            try:
+                bdf = '{:04x}:{:02x}:{:02x}.{}'.format(
+                    int(address.attrib['domain'], 0),
+                    int(address.attrib['bus'], 0),
+                    int(address.attrib['slot'], 0),
+                    int(address.attrib['function'], 0),
+                )
+            except (KeyError, ValueError) as exc:
+                raise RuntimeError('running rental domain has an invalid PCI hostdev') from exc
+            slot = configured.get(bdf.lower())
+            if slot is None:
+                raise RuntimeError('running rental domain uses an unknown configured GPU')
+            slots.append(slot)
+        return sorted(set(slots))
+
     def ready(self):
         try:
             validate_export(self.shared_config)
@@ -502,3 +541,4 @@ class SimulationBackend:
     def force_off(self,instance): self.stop(instance)
     def recovered(self,instance): return self.state(instance)=='off'
     def release(self,instance): self.states.pop(instance['id'],None)
+

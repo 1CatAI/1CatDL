@@ -60,6 +60,31 @@ class DeliveryCoreTests(unittest.TestCase):
         self.core.mark_off(vm['id'])
         self.assertEqual(self.core.metrics()['active_slots'], 0)
 
+    def test_orphan_running_domain_is_adopted_without_retroactive_billing(self):
+        self.core.set_price('operator', 400)
+        vm = self.order('orphan', 0)
+        adopted = self.core.reconcile_orphan_running(vm['id'], [1])
+        self.assertEqual(adopted['state'], 'running')
+        self.assertEqual(adopted['slot'], 1)
+        self.assertEqual(adopted['endpoint'], 1)
+        usage = self.core._connection()
+        with usage as db:
+            ledger = db.execute('SELECT * FROM usage_ledger WHERE instance_id=? AND closed_at IS NULL', (vm['id'],)).fetchone()
+        self.assertIsNotNone(ledger)
+        self.assertEqual(ledger['rate_cents_per_hour'], 400)
+        self.assertEqual(ledger['opened_at'], ledger['last_billed_at'])
+        self.assertEqual(self.core.audit('operator')[0]['event'], 'orphan_runtime_reconciled')
+
+    def test_orphan_adoption_fails_closed_on_slot_conflict(self):
+        self.core.set_price('operator', 400)
+        first = self.order('first', 0)
+        self.core.action('alice', first['id'], 'start'); self.core.mark_running(first['id'])
+        second = self.order('second', 0)
+        with self.assertRaisesRegex(RuntimeError, 'conflicts'):
+            self.core.reconcile_orphan_running(second['id'], [1])
+        self.assertEqual(self.core.list_instances('alice')[1]['state'], 'stopped')
+        self.assertIsNone(self.core.list_instances('alice')[1]['slot'])
+
     def test_shared_pool_more_than_fourteen_system_disks(self):
         for n in range(20): self.order(str(n), 0)
         self.assertEqual(len(self.core.list_instances('alice')), 20)
@@ -177,3 +202,4 @@ class DeliveryServiceTests(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+

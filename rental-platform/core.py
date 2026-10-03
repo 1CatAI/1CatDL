@@ -1212,6 +1212,47 @@ class Core(RechargeCodeMixin):
             ).fetchall()
         return [self._public(row) for row in rows]
 
+    def reconcile_orphan_running(self, instance_id: int, slots: list[int], node_id: str = LOCAL_NODE) -> dict[str, Any] | None:
+        """Adopt a running local domain whose durable row says it is stopped.
+
+        This is deliberately fail-closed: unknown devices, a slot conflict, a
+        non-GPU instance, or an already-active row produce no adoption.  The
+        method only starts billing at the observation time; it never guesses
+        how long an orphan domain was running before it was discovered.
+        """
+        if not isinstance(instance_id, int) or not slots or any(type(slot) is not int for slot in slots):
+            return None
+        with self._transaction() as con:
+            row = con.execute("SELECT * FROM instances WHERE id=?", (instance_id,)).fetchone()
+            if row is None or row['node_id'] != node_id or row['mode'] != 'gpu':
+                return None
+            if row['state'] not in ('stopped', 'error') or row['slot'] is not None or row['endpoint'] is not None:
+                return None
+            expected = set(gpu_slots(slots[0], row['gpu_count']))
+            if set(slots) != expected:
+                raise RuntimeError('running rental domain GPU count does not match durable instance plan')
+            occupied = set()
+            for item in con.execute("SELECT slot,gpu_count FROM instances WHERE id!=? AND slot IS NOT NULL", (instance_id,)):
+                occupied.update(gpu_slots(item['slot'], item['gpu_count']))
+            if occupied.intersection(expected):
+                raise RuntimeError('running rental domain GPU slot conflicts with a durable reservation')
+            now = _now()
+            con.execute(
+                """UPDATE instances SET slot=?, endpoint=?, state='running', desired_action=NULL,
+                   error=NULL, confirmed_through=?, updated_at=?, last_activity_at=? WHERE id=?""",
+                (slots[0], slots[0], now, now, now, instance_id),
+            )
+            if con.execute("SELECT 1 FROM usage_ledger WHERE instance_id=? AND closed_at IS NULL", (instance_id,)).fetchone() is None:
+                con.execute(
+                    "INSERT INTO usage_ledger(instance_id,owner,opened_at,rate_cents_per_hour,last_billed_at) VALUES (?,?,?,?,?)",
+                    (instance_id, row['owner'], now, self.rate_for_mode(row['mode'], row['gpu_count']), now),
+                )
+            self._audit(con, 'system', 'orphan_runtime_reconciled', instance_id, {
+                'nodeId': node_id, 'slots': sorted(expected), 'billingStartedAt': now,
+            })
+            result = con.execute("SELECT * FROM instances WHERE id=?", (instance_id,)).fetchone()
+        return self._public(result)
+
     def pending(self) -> list[dict[str, Any]]:
         with self._connection() as con:
             rows = con.execute(
@@ -1503,3 +1544,4 @@ class Core(RechargeCodeMixin):
             "states": states,
             "open_usage_intervals": open_intervals,
         }
+
